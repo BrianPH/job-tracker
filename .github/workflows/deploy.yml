@@ -1,0 +1,43 @@
+# Build & deploy on the Raspberry Pi via its self-hosted runner.
+# Push to main -> tests run inside the image -> stack is (re)built and restarted.
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # lets you trigger a deploy manually from the Actions tab
+
+# Never run two deploys at once on the Pi.
+concurrency:
+  group: pi-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Any self-hosted runner registered on this repo. If you label your Pi runner,
+    # you can tighten this to e.g. [self-hosted, Linux, ARM64].
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # IMPORTANT: keep untracked, git-ignored files (config/, .env, data/,
+          # applications/) between deploys — do NOT git-clean them away.
+          clean: false
+
+      - name: Build app image
+        run: docker compose build app
+
+      - name: Run offline tests (inside the image)
+        run: |
+          docker compose run --rm --no-deps app python -m tests.test_pipeline
+          docker compose run --rm --no-deps app python -m tests.test_storage_upsert
+          docker compose run --rm --no-deps app python -m tests.test_scorer
+
+      - name: Deploy (start/refresh the stack)
+        run: docker compose up -d
+
+      - name: Prune dangling images
+        run: docker image prune -f

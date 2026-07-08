@@ -1,20 +1,78 @@
-# Local, free LLM for fit-scoring — no API keys, no per-call cost.
+# Full stack for job-tracker: Postgres + local Ollama LLM + the web app.
 #
-#   docker compose up -d
-#   docker compose exec ollama ollama pull llama3.2:1b   # one-time model download
+#   docker compose up -d                 # build (if needed) and start everything
+#   docker compose logs -f app           # follow the app
+#   docker compose exec ollama ollama pull qwen2.5:1.5b   # (auto-done by ollama-pull)
 #
-# Then set LLM_BACKEND=ollama (default) in .env and run `python run.py`.
-# The server listens on http://localhost:11434 (OLLAMA_HOST).
+# Personal data (config/, .env, applications/) is bind-mounted from this directory,
+# NOT baked into the image — see DEPLOY.md.
 
 services:
+  db:
+    image: postgres:16
+    container_name: jobtracker-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobtracker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-jobtracker}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobtracker}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+    restart: unless-stopped
+
   ollama:
     image: ollama/ollama:latest
     container_name: jobtracker-ollama
-    ports:
-      - "11434:11434"
+    environment:
+      # Unload the model quickly after use to free RAM on the Pi.
+      OLLAMA_KEEP_ALIVE: "30s"
     volumes:
       - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # One-shot: pulls the scoring model into the ollama volume, then exits.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+    entrypoint: ["/bin/sh", "-c", "ollama pull ${OLLAMA_MODEL:-qwen2.5:1.5b}"]
+    restart: "no"
+
+  app:
+    build: .
+    image: jobtracker-app:latest
+    container_name: jobtracker-app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      LLM_BACKEND: ollama
+      OLLAMA_HOST: "http://ollama:11434"
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-jobtracker}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-jobtracker}"
+    volumes:
+      - ./config:/app/config              # setpoints/profile/companies (editable via UI)
+      - ./data:/app/data                  # local-JSON fallback (if DB ever unset)
+      - ./applications:/app/applications  # generated CV + letters land here
+      - ./Solliciteren:/app/Solliciteren:ro  # your example letters (writing style)
+    ports:
+      - "8000:8000"                       # web UI on http://<pi-ip>:8000
+    mem_limit: 768m
     restart: unless-stopped
 
 volumes:
+  pgdata:
   ollama:
