@@ -17,13 +17,13 @@
     <button type="submit">Filter</button>
     <a href="/" class="muted">reset</a>
   </form>
-  <form method="post" action="/scrape" class="inline" style="float:right; margin-top:-30px">
+  <form method="post" action="/scrape" class="inline scrape-form" style="float:right; margin-top:-30px">
     <button type="submit" {% if scrape.running %}disabled{% endif %}>
       {% if scrape.running %}Scrapen bezig...{% else %}Scrape nu{% endif %}
     </button>
   </form>
   {% if scrape.running or scrape.log %}
-    <p class="muted" style="margin:8px 0 0">
+    <p class="muted" style="margin:8px 0 0; clear:both">
       {% if scrape.running %}Pipeline draait — {% endif %}
       <a href="/scrape/log" target="_blank">bekijk log</a>
       {% if scrape.last_summary %}
@@ -38,13 +38,13 @@
 <div class="card">
   <p class="muted">{{ jobs|length }} vacatures</p>
   <table>
-    <tr>
+    <tr class="head">
       <th>Score</th><th>Vacature</th><th>Bedrijf</th><th>Locatie</th>
       <th>Salaris</th><th>Geplaatst</th><th>Status</th><th>Documenten</th>
     </tr>
     {% for j in jobs %}
     <tr>
-      <td>
+      <td data-label="Score">
         {% if j.fit_score is not none %}
           <span class="badge {% if j.fit_score >= 70 %}b-high{% elif j.fit_score >= 40 %}b-mid{% else %}b-low{% endif %}"
                 title="{{ j.fit_reason or '' }}">{{ j.fit_score }}</span>
@@ -53,20 +53,21 @@
       <td>
         <a class="job" href="{{ j.url }}" target="_blank" rel="noopener">{{ j.title }}</a>
         {% if j.remote %}<span class="remote">● remote</span>{% endif %}
+        {% if j.fit_persona %}<span style="display:inline-block;background:#e7eef7;color:#1f4e79;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:600;margin-left:4px">{{ j.fit_persona }}</span>{% endif %}
         {% if j.fit_reason %}<div class="muted">{{ j.fit_reason }}</div>{% endif %}
       </td>
-      <td>{{ j.company }}<div class="muted">{{ j.source }}</div></td>
-      <td>{{ j.location }}</td>
-      <td>{{ j.salary or "—" }}</td>
-      <td class="muted">{{ j.posted_date or "" }}</td>
-      <td>
+      <td data-label="Bedrijf">{{ j.company }} <span class="muted">({{ j.source }})</span></td>
+      <td data-label="Locatie" {% if not j.location %}class="empty-mobile"{% endif %}>{{ j.location or "—" }}</td>
+      <td data-label="Salaris" {% if not j.salary %}class="empty-mobile"{% endif %}>{{ j.salary or "—" }}</td>
+      <td data-label="Geplaatst" {% if not j.posted_date %}class="empty-mobile"{% endif %}><span class="muted">{{ j.posted_date or "—" }}</span></td>
+      <td data-label="Status">
         <form method="post" action="/jobs/{{ j.job_id }}/status" class="inline">
           <select name="status" onchange="this.form.submit()">
             {% for s in statuses %}<option value="{{ s }}" {% if j.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
           </select>
         </form>
       </td>
-      <td>
+      <td data-label="Documenten">
         {% set gen = generation.get(j.job_id) %}
         {% if gen and gen.state == "done" %}
           <div class="filelinks">

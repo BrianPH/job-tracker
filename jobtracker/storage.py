@@ -20,7 +20,7 @@ TIMEOUT = 30
 INSERT_COLUMNS = [
     "job_id", "title", "company", "source", "url", "location",
     "remote", "salary", "description", "posted_date", "status",
-    "fit_score", "fit_reason",
+    "fit_score", "fit_reason", "fit_persona",
 ]
 # On conflict, refresh these from the incoming row. Deliberately excludes
 # job_id (key), status + fit_score + fit_reason (user/LLM-owned), first_seen (set once).
@@ -31,9 +31,9 @@ CONFLICT_UPDATE_COLUMNS = [
 # Written only when the incoming value is non-null; otherwise the EXISTING value is
 # kept. This lets a freshly computed score land on a row that had none, while a plain
 # re-scrape (no score) never wipes an existing score.
-COALESCE_COLUMNS = ["fit_score", "fit_reason"]
+COALESCE_COLUMNS = ["fit_score", "fit_reason", "fit_persona"]
 # Preserved on re-scrape when the incoming value is empty (local JSON backend).
-_PRESERVE_IF_EMPTY = ("fit_score", "fit_reason")
+_PRESERVE_IF_EMPTY = ("fit_score", "fit_reason", "fit_persona")
 
 
 def build_upsert_sql(placeholder: str = "%s", now: str = "now()", returning: str = "") -> str:
@@ -58,7 +58,7 @@ def job_row(job: Job) -> tuple:
     vals = []
     for col in INSERT_COLUMNS:
         v = rec.get(col)
-        if col in ("posted_date", "fit_reason") and not v:
+        if col in ("posted_date", "fit_reason", "fit_persona") and not v:
             v = None
         vals.append(v)
     return tuple(vals)
@@ -117,7 +117,7 @@ class PostgresStore:
     def fetch(self, status: Optional[str] = None, company: Optional[str] = None,
               min_score: Optional[int] = None) -> List[dict]:
         q = ("SELECT job_id,title,company,source,location,remote,salary,url,posted_date,"
-             "status,fit_score,fit_reason,first_seen FROM jobs")
+             "status,fit_score,fit_reason,fit_persona,first_seen FROM jobs")
         conds, params = [], []
         if status:
             conds.append("status = %s")
@@ -200,6 +200,7 @@ class AirtableStore:
         "description": "Description", "posted_date": "Posted date",
         "source": "Source", "job_id": "Job ID", "status": "Status",
         "fit_score": "Fit score", "fit_reason": "Fit reason",
+        "fit_persona": "Fit persona",
     }
 
     def __init__(self, token: str, base_id: str, table_name: str = "Jobs"):

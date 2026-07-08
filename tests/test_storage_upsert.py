@@ -31,6 +31,7 @@ CREATE TABLE jobs (
     status      TEXT NOT NULL DEFAULT 'New',
     fit_score   INTEGER,
     fit_reason  TEXT,
+    fit_persona TEXT,
     first_seen  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_seen   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -79,7 +80,7 @@ def test_upsert_preserves_status_and_score():
 
 def test_sql_shape():
     sql = build_upsert_sql("%s", "now()", returning="RETURNING (xmax = 0) AS inserted")
-    assert sql.count("%s") == len(INSERT_COLUMNS) == 13
+    assert sql.count("%s") == len(INSERT_COLUMNS) == 14
     assert "ON CONFLICT (job_id) DO UPDATE" in sql
     set_clause = sql.split("DO UPDATE SET", 1)[1]
     # status is fully user-owned: never written on conflict

@@ -54,6 +54,20 @@ python -m tests.test_webapp
 - **Daily scrape** — APScheduler runs the pipeline once a day at the configured
   hour, as long as the web app is running.
 
+## Access from your phone / other devices
+
+```bash
+python run_web.py --lan
+```
+
+This binds to all interfaces and prints a `Network: http://<your-ip>:8000`
+address — open that on any device on the same wifi. Allow Python through the
+Windows Firewall (private networks) when prompted the first time. The app has
+no login, so only use `--lan` on networks you trust.
+
+The UI is responsive: on phones the vacancy table becomes stacked cards and
+filters/buttons are full-width touch targets.
+
 ## CV / motivation-letter generation
 
 Facts (experience, education, skills, contact details) come from
@@ -116,9 +130,25 @@ docker compose exec ollama ollama pull llama3.2:1b    # ~1.3 GB, tiny + fast
 larger model (`qwen2.5:3b`, `llama3.2:3b`) and set `OLLAMA_MODEL`. Set
 `LLM_BACKEND=anthropic` + `ANTHROPIC_API_KEY` for the hosted option.
 
-Each new job is scored 0-100 against `profile.summary` with a one-line reason;
-only new jobs are scored per run. `--rescore` re-scores everything,
-`--no-score` skips scoring.
+Scoring is **persona-based**: `config/profile.yaml` defines your career paths
+(personas) — e.g. Bioinformatics, .NET Developer, Cloud/DevOps, Data Engineer.
+For each vacancy the model picks the single best-matching path and scores the
+job against that path alone, so a pure DevOps role is no longer punished for
+not being bioinformatics. The chosen persona is stored and shown in the web UI.
+`persona_constraints` holds rules that apply to every path (e.g. seniority).
+Only new jobs are scored per run. `--rescore` re-scores everything (do this
+once after changing personas), `--no-score` skips scoring.
+
+**Test the scoring quickly** with realistic sample vacancies:
+
+```bash
+python score_test.py                    # 10 test vacancies vs expected ranges
+python score_test.py --only devops      # subset
+python score_test.py --model qwen2.5:3b # compare models
+python score_test.py --verbose          # show raw model replies
+```
+
+Edit `CASES` in `score_test.py` to add your own test vacancies.
 
 ---
 

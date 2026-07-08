@@ -92,3 +92,41 @@ docker compose exec ollama ollama list   # confirm the model is present
   deploy.
 - **Postgres access**: the DB port isn't published to the LAN by default. To browse it
   with a GUI, add `ports: ["5432:5432"]` to the `db` service.
+
+## Troubleshooting the first deploy
+
+The heaviest part of the first deploy is pulling the base images — especially
+`ollama/ollama` (~1.5–2 GB, and it needs roughly double that free to extract). The
+workflow now pulls `db` and `ollama` **one at a time with retries** in a dedicated
+step, and the final `up` uses `--pull never --no-build`, so a slow download can't
+hang the deploy.
+
+**"Failed halfway through extracting" / stuck at `0B pulling fs layer`:**
+
+1. **Disk space** is the usual culprit. On the Pi:
+   ```bash
+   df -h .              # is the SD card near 100%?
+   docker system df     # space used by images/containers/volumes
+   docker system prune -f
+   ```
+   If space is tight, remove old images/build cache (`docker builder prune -f`) or use
+   a larger SD card. Ollama + Postgres + Python images want a few GB free.
+
+2. **Docker Hub rate limit** (anonymous pulls are capped). Either wait and retry, or
+   authenticate once on the Pi:
+   ```bash
+   docker login
+   ```
+
+3. **Recover a stuck run**: cancel the workflow, then on the Pi
+   ```bash
+   docker compose down
+   docker system prune -f
+   docker pull ollama/ollama:latest    # pull manually to see the real error
+   ```
+   Once the images are present locally, re-running the workflow is fast (the pull step
+   is a no-op and `up` starts immediately).
+
+**Reproducible pulls:** `ollama/ollama:latest` can re-download when its digest
+changes. To avoid surprise re-pulls, pin a specific version in `docker-compose.yml`
+(e.g. `image: ollama/ollama:0.5.7`) after confirming the tag exists for arm64.

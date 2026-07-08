@@ -1,5 +1,5 @@
-"""Offline tests for the LLM scorer: prompt building, per-job response parsing,
-backend selection, and assignment. Fake caller — no network, no server.
+"""Offline tests for the persona-based LLM scorer: prompt building, response
+parsing, backend selection, and assignment. Fake caller — no network, no server.
 Run:  python -m tests.test_scorer
 """
 import os
@@ -9,39 +9,55 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jobtracker.models import Job
-from jobtracker.scorer import build_job_prompt, parse_score, score_jobs, make_caller
+from jobtracker.scorer import (build_job_prompt, get_personas, parse_score,
+                               score_jobs, make_caller)
 
 PROFILE = {
-    "profile": {"summary": "Bioinformatician, Python, NGS pipelines.",
-                "must_haves": ["Python"], "nice_to_haves": ["cloud"]},
+    "personas": [
+        {"name": "Bioinformatics", "summary": "Python, NGS pipelines, junior."},
+        {"name": "Cloud / DevOps Engineer", "summary": "CI/CD, Docker, Linux, Azure."},
+    ],
+    "persona_constraints": "Early-career (0-3 years); senior roles are a weak fit.",
+    "profile": {"summary": "Bioinformatician, Python, NGS pipelines."},
     "rules": {"keywords_any": ["bioinformatics", "genomics"]},
 }
 JOBS = [
     Job(title="Bioinformatics Scientist", company="GenomeScan", source="Recruitee",
         description="Build NGS pipelines in Python.", job_id="a1"),
-    Job(title="Warehouse Operator", company="Amgen", source="Workday",
-        description="Move boxes.", job_id="b2"),
+    Job(title="CI/CD Engineer", company="FinTechCo", source="Greenhouse",
+        description="Maintain CI/CD pipelines and Kubernetes clusters.", job_id="b2"),
 ]
 
 
-def test_build_job_prompt():
-    system, user = build_job_prompt(PROFILE, JOBS[0])
-    assert "JSON object" in system
-    assert "Bioinformatics Scientist" in user and "GenomeScan" in user
-    assert "Bioinformatician" in user  # profile included
-    print("PASS test_build_job_prompt")
+def test_personas_in_prompt():
+    system, user = build_job_prompt(PROFILE, JOBS[1])
+    assert "persona" in system.lower()
+    assert "only ONE" in user or "only one" in user.lower()
+    assert "Bioinformatics" in user and "Cloud / DevOps Engineer" in user
+    assert "Early-career" in user                 # constraints included
+    assert "CI/CD Engineer" in user and "FinTechCo" in user
+    print("PASS test_personas_in_prompt")
+
+
+def test_get_personas_fallback():
+    assert len(get_personas(PROFILE)) == 2
+    assert get_personas({})[0]["name"] == "Generalist"   # no personas configured
+    print("PASS test_get_personas_fallback")
 
 
 def test_parse_object_and_clamp():
-    assert parse_score('{"score":92,"reason":"Great fit"}') == (92, "Great fit")
-    assert parse_score('{"score":150,"reason":"x"}')[0] == 100      # clamp
+    assert parse_score('{"persona":"Cloud / DevOps Engineer","score":85,"reason":"Fits"}') \
+        == (85, "Fits", "Cloud / DevOps Engineer")
+    assert parse_score('{"score":150,"reason":"x"}')[0] == 100          # clamp
     assert parse_score('here: {"score": 40, "reason": "ok"} done')[0] == 40  # prose around
+    assert parse_score('{"score":90,"reason":"y"}')[2] == ""            # persona optional
+    assert parse_score('{"persona":"none","score":5,"reason":"z"}')[2] == ""  # 'none' -> empty
     print("PASS test_parse_object_and_clamp")
 
 
 def test_parse_array_and_wrapped():
-    assert parse_score('[{"score":80,"reason":"ok"}]') == (80, "ok")     # array form
-    assert parse_score('{"result":{"score":70,"reason":"z"}}') == (70, "z")  # wrapped
+    assert parse_score('[{"score":80,"reason":"ok"}]')[:2] == (80, "ok")          # array form
+    assert parse_score('{"result":{"score":70,"reason":"z"}}')[:2] == (70, "z")   # wrapped
     print("PASS test_parse_array_and_wrapped")
 
 
@@ -61,27 +77,31 @@ def test_backend_selection():
         assert make_caller() is None                # anthropic without key
     finally:
         for k, v in saved.items():
-            os.environ[k] = v if v is not None else os.environ.pop(k, "") and ""
             if v is None:
                 os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     print("PASS test_backend_selection")
 
 
-def test_score_jobs_assigns():
+def test_score_jobs_assigns_persona():
     def fake_caller(system, user):
-        score = 90 if "Bioinformatics" in user else 5
-        return f'{{"score": {score}, "reason": "auto"}}'
+        if "Bioinformatics Scientist" in user:
+            return '{"persona": "Bioinformatics", "score": 90, "reason": "NGS work"}'
+        return '{"persona": "Cloud / DevOps Engineer", "score": 82, "reason": "CI/CD work"}'
     n = score_jobs(JOBS, PROFILE, caller=fake_caller)
     assert n == 2
-    assert JOBS[0].fit_score == 90 and JOBS[1].fit_score == 5
-    print("PASS test_score_jobs_assigns")
+    assert JOBS[0].fit_score == 90 and JOBS[0].fit_persona == "Bioinformatics"
+    assert JOBS[1].fit_score == 82 and JOBS[1].fit_persona == "Cloud / DevOps Engineer"
+    print("PASS test_score_jobs_assigns_persona")
 
 
 if __name__ == "__main__":
-    test_build_job_prompt()
+    test_personas_in_prompt()
+    test_get_personas_fallback()
     test_parse_object_and_clamp()
     test_parse_array_and_wrapped()
     test_parse_bad()
     test_backend_selection()
-    test_score_jobs_assigns()
+    test_score_jobs_assigns_persona()
     print("\nAll scorer tests passed.")

@@ -35,6 +35,29 @@
   textarea { width:100%; min-height:120px; }
   label b { display:block; margin:12px 0 4px; }
   pre { background:#0f1720; color:#d7e2ec; padding:12px; border-radius:8px; font-size:12px; overflow:auto; max-height:320px; }
+
+  /* --- mobile (phones) --- */
+  @media (max-width: 720px) {
+    header { padding:10px 14px; flex-wrap:wrap; gap:10px; }
+    main { margin:12px auto; padding:0 8px; }
+    .card { padding:12px; }
+    .filters { flex-direction:column; align-items:stretch; }
+    .filters input[type=text], .filters input[type=number], .filters select, .filters button { width:100%; }
+    select, input, button { min-height:42px; font-size:15px; }  /* touch targets */
+    button.small { min-height:38px; }
+    form.scrape-form { float:none !important; margin:10px 0 0 !important; display:block; }
+    form.scrape-form button { width:100%; }
+
+    /* table -> stacked cards */
+    table, tbody, tr, td { display:block; width:100%; }
+    table tr.head { display:none; }
+    tr { border:1px solid var(--border); border-radius:8px; margin-bottom:12px; padding:8px 10px; background:#fff; }
+    tr:hover td { background:transparent; }
+    td { border:none; padding:4px 2px; }
+    td[data-label]::before { content:attr(data-label); display:inline-block; min-width:92px;
+                             font-weight:600; color:#68737f; font-size:12px; vertical-align:top; }
+    td.empty-mobile { display:none; }
+  }
 </style>
 </head>
 <body>

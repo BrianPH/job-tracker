@@ -34,7 +34,7 @@ def html_to_text(html: Optional[str]) -> str:
 class Job:
     title: str
     company: str
-    source: str                      # Recruitee / Workday / Teamtailor / AcademicTransfer / HTML
+    source: str                      # Recruitee / Workday / Teamtailor / ...
     url: str = ""
     location: str = ""
     remote: bool = False
@@ -45,6 +45,7 @@ class Job:
     status: str = "New"
     fit_score: Optional[int] = None  # 0-100, set by the LLM scorer (Phase 4)
     fit_reason: str = ""             # one-line rationale from the scorer
+    fit_persona: str = ""            # best-matching career path chosen by the scorer
 
     def __post_init__(self):
         if not self.job_id:

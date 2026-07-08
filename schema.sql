@@ -15,13 +15,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     status       TEXT        NOT NULL DEFAULT 'New',
     fit_score    INTEGER,
     fit_reason   TEXT,
+    fit_persona  TEXT,
     first_seen   TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Migrations for existing databases created before Phase 4:
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS fit_score  INTEGER;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS fit_reason TEXT;
+-- Migrations for existing databases:
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS fit_score   INTEGER;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS fit_reason  TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS fit_persona TEXT;
 
 CREATE INDEX IF NOT EXISTS jobs_company_idx ON jobs (company);
 CREATE INDEX IF NOT EXISTS jobs_status_idx  ON jobs (status);

@@ -6,26 +6,49 @@ name: deploy
 on:
   push:
     branches: [main]
-  workflow_dispatch:   # lets you trigger a deploy manually from the Actions tab
+  workflow_dispatch:
 
-# Never run two deploys at once on the Pi.
 concurrency:
   group: pi-deploy
   cancel-in-progress: false
 
 jobs:
   deploy:
-    # Any self-hosted runner registered on this repo. If you label your Pi runner,
-    # you can tighten this to e.g. [self-hosted, Linux, ARM64].
-    runs-on: self-hosted
+    runs-on: self-hosted        # narrow to [self-hosted, Linux, ARM64] if you label the runner
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # IMPORTANT: keep untracked, git-ignored files (config/, .env, data/,
-          # applications/) between deploys — do NOT git-clean them away.
-          clean: false
+          clean: false          # keep git-ignored config/, .env, data/, applications/
+
+      - name: Show disk + reclaim space
+        run: |
+          df -h .
+          docker system df || true
+          # remove stopped containers + dangling images from earlier failed runs
+          # (named volumes pgdata/ollama are NOT touched)
+          docker system prune -f
+
+      - name: Pull base images (sequential, with retries)
+        env:
+          COMPOSE_PARALLEL_LIMIT: "1"   # extract one large layer at a time (kind to the SD card)
+        run: |
+          set -e
+          for svc in db ollama; do
+            ok=0
+            for i in 1 2 3; do
+              echo "::group::pull $svc (attempt $i)"
+              if timeout 900 docker compose pull "$svc"; then ok=1; echo "::endgroup::"; break; fi
+              echo "::endgroup::"
+              echo "pull of $svc failed (attempt $i); retrying in 30s..."
+              sleep 30
+            done
+            if [ "$ok" -ne 1 ]; then
+              echo "Could not pull $svc after 3 attempts (check disk space / Docker Hub rate limit)."
+              exit 1
+            fi
+          done
 
       - name: Build app image
         run: docker compose build app
@@ -36,8 +59,8 @@ jobs:
           docker compose run --rm --no-deps app python -m tests.test_storage_upsert
           docker compose run --rm --no-deps app python -m tests.test_scorer
 
-      - name: Deploy (start/refresh the stack)
-        run: docker compose up -d
+      - name: Deploy (images already local — no pull/build here)
+        run: docker compose up -d --no-build --pull never
 
       - name: Prune dangling images
         run: docker image prune -f
