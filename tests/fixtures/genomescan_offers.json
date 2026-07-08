@@ -1,0 +1,59 @@
+{
+  "offers": [
+    {
+      "id": 2575664,
+      "guid": "54y7n",
+      "title": "Director Commercial Laboratory",
+      "company_name": "GenomeScan B.V.",
+      "status": "published",
+      "remote": false,
+      "hybrid": false,
+      "on_site": true,
+      "city": "Leiden",
+      "location": "Leiden, Zuid-Holland, Netherlands",
+      "country": "Netherlands",
+      "salary": { "min": null, "max": null, "period": null, "currency": "EUR" },
+      "careers_url": "https://genomescan.recruitee.com/o/director-commercial-laboratory",
+      "careers_apply_url": "https://genomescan.recruitee.com/o/director-commercial-laboratory/c/new",
+      "created_at": "2026-04-21 14:12:00 UTC",
+      "published_at": "2026-04-21 14:50:28 UTC",
+      "updated_at": "2026-04-21 14:50:28 UTC",
+      "description": "<p class=\"MsoNormal\">We are seeking an experienced <strong>Director Commercial Laboratory</strong> to lead the strategic, commercial, and operational direction of our Commercial Laboratory.</p><p class=\"MsoNormal\"><strong>What do we offer you?</strong></p><ul><li><p>Salary between € 8.320, - and € 10.545, - gross per month.</p></li></ul>",
+      "requirements": "<ul><li><p>Master’s degree or PhD in Molecular Biology (or equivalent).</p></li><li><p>Minimum of 5 years with Next Generation Sequencing.</p></li></ul>"
+    },
+    {
+      "id": 1662515,
+      "guid": "h2y42",
+      "title": "Open Application - Laboratory",
+      "company_name": "GenomeScan B.V.",
+      "status": "published",
+      "remote": false,
+      "city": "Leiden",
+      "location": "Leiden, Zuid-Holland, Netherlands",
+      "country": "Netherlands",
+      "salary": { "min": null, "max": null, "period": null, "currency": null },
+      "careers_url": "https://genomescan.recruitee.com/o/open-application-laboratory",
+      "created_at": "2024-04-05 13:06:27 UTC",
+      "published_at": "2026-05-11 15:29:51 UTC",
+      "description": "<p>We welcome open applications for laboratory internships and roles.</p>",
+      "requirements": "<p>Do you recognize yourself in our values?</p>"
+    },
+    {
+      "id": 1662278,
+      "guid": "2cwk2",
+      "title": "Open Application - Bio-IT or ICT",
+      "company_name": "GenomeScan B.V.",
+      "status": "published",
+      "remote": false,
+      "city": "Leiden",
+      "location": "Leiden, Zuid-Holland, Netherlands",
+      "country": "Netherlands",
+      "salary": { "min": null, "max": null, "period": null, "currency": null },
+      "careers_url": "https://genomescan.recruitee.com/o/open-application-bio-it-ict",
+      "created_at": "2024-04-05 11:48:59 UTC",
+      "published_at": "2026-06-10 06:54:50 UTC",
+      "description": "<p>We welcome open applications within Bio-IT or ICT.</p>",
+      "requirements": "<p>Do you recognize yourself in our values?</p>"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+# Local, free LLM for fit-scoring — no API keys, no per-call cost.
+#
+#   docker compose up -d
+#   docker compose exec ollama ollama pull llama3.2:1b   # one-time model download
+#
+# Then set LLM_BACKEND=ollama (default) in .env and run `python run.py`.
+# The server listens on http://localhost:11434 (OLLAMA_HOST).
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: jobtracker-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama:

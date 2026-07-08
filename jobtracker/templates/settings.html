@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+  <h2>Instellingen (setpoints)</h2>
+  {% if saved %}<p class="ok">Opgeslagen. Wijzigingen gelden vanaf de volgende scrape.</p>{% endif %}
+  <form method="post" action="/settings">
+    <label><b>Trefwoorden (één per regel) — vacature moet er minstens één bevatten</b>
+      <textarea name="keywords">{{ keywords }}</textarea></label>
+
+    <label><b>Uitsluiten (één per regel) — vacature wordt verworpen als deze voorkomen</b>
+      <textarea name="excludes">{{ excludes }}</textarea></label>
+
+    <label><b>Locaties (één per regel; leeg = alles toestaan)</b>
+      <textarea name="locations">{{ locations }}</textarea></label>
+
+    <label style="display:block;margin:12px 0">
+      <input type="checkbox" name="always_keep_remote" {% if always_keep_remote %}checked{% endif %}>
+      Remote vacatures altijd behouden (ook buiten de locatielijst — nodig voor internationale remote banen)
+    </label>
+
+    <label><b>Minimum salaris (EUR per jaar; 0 = uit; vacatures zonder salaris worden nooit verworpen)</b>
+      <input type="number" name="min_salary" min="0" step="1000" value="{{ min_salary }}"></label>
+
+    <label><b>Dagelijkse scrape om (uur, 0-23; draait zolang de webapp aanstaat)</b>
+      <input type="number" name="scrape_hour" min="0" max="23" value="{{ scrape_hour }}"></label>
+
+    <label><b>Profieltekst (gebruikt door LLM-scoring en CV/brief-generatie)</b>
+      <textarea name="summary" style="min-height:180px">{{ summary }}</textarea></label>
+
+    <p><button type="submit">Opslaan</button></p>
+  </form>
+</div>
+
+{% endblock %}

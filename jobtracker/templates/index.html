@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+  <form method="get" action="/" class="filters">
+    <input type="text" name="q" placeholder="Zoek titel/bedrijf" value="{{ flt.q }}">
+    <select name="status">
+      <option value="">Alle statussen</option>
+      {% for s in statuses %}<option value="{{ s }}" {% if flt.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+    </select>
+    <select name="source">
+      <option value="">Alle bronnen</option>
+      {% for s in sources %}<option value="{{ s }}" {% if flt.source == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+    </select>
+    <input type="number" name="min_score" placeholder="Min. score" min="0" max="100" style="width:100px" value="{{ flt.min_score }}">
+    <label><input type="checkbox" name="remote" value="1" {% if flt.remote %}checked{% endif %}> alleen remote</label>
+    <button type="submit">Filter</button>
+    <a href="/" class="muted">reset</a>
+  </form>
+  <form method="post" action="/scrape" class="inline" style="float:right; margin-top:-30px">
+    <button type="submit" {% if scrape.running %}disabled{% endif %}>
+      {% if scrape.running %}Scrapen bezig...{% else %}Scrape nu{% endif %}
+    </button>
+  </form>
+  {% if scrape.running or scrape.log %}
+    <p class="muted" style="margin:8px 0 0">
+      {% if scrape.running %}Pipeline draait — {% endif %}
+      <a href="/scrape/log" target="_blank">bekijk log</a>
+      {% if scrape.last_summary %}
+        | laatste run: {{ scrape.last_summary.fetched }} opgehaald,
+        {{ scrape.last_summary.kept }} relevant, {{ scrape.last_summary.scored }} gescoord
+        {% if scrape.last_summary.errors %} | <span class="err">{{ scrape.last_summary.errors|length }} bron(nen) faalden</span>{% endif %}
+      {% endif %}
+    </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <p class="muted">{{ jobs|length }} vacatures</p>
+  <table>
+    <tr>
+      <th>Score</th><th>Vacature</th><th>Bedrijf</th><th>Locatie</th>
+      <th>Salaris</th><th>Geplaatst</th><th>Status</th><th>Documenten</th>
+    </tr>
+    {% for j in jobs %}
+    <tr>
+      <td>
+        {% if j.fit_score is not none %}
+          <span class="badge {% if j.fit_score >= 70 %}b-high{% elif j.fit_score >= 40 %}b-mid{% else %}b-low{% endif %}"
+                title="{{ j.fit_reason or '' }}">{{ j.fit_score }}</span>
+        {% else %}<span class="badge b-none" title="nog niet gescoord">—</span>{% endif %}
+      </td>
+      <td>
+        <a class="job" href="{{ j.url }}" target="_blank" rel="noopener">{{ j.title }}</a>
+        {% if j.remote %}<span class="remote">● remote</span>{% endif %}
+        {% if j.fit_reason %}<div class="muted">{{ j.fit_reason }}</div>{% endif %}
+      </td>
+      <td>{{ j.company }}<div class="muted">{{ j.source }}</div></td>
+      <td>{{ j.location }}</td>
+      <td>{{ j.salary or "—" }}</td>
+      <td class="muted">{{ j.posted_date or "" }}</td>
+      <td>
+        <form method="post" action="/jobs/{{ j.job_id }}/status" class="inline">
+          <select name="status" onchange="this.form.submit()">
+            {% for s in statuses %}<option value="{{ s }}" {% if j.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+          </select>
+        </form>
+      </td>
+      <td>
+        {% set gen = generation.get(j.job_id) %}
+        {% if gen and gen.state == "done" %}
+          <div class="filelinks">
+            {% for f in gen.files %}<a href="/applications/{{ f }}">{{ f.split("/")[-1] }}</a>{% endfor %}
+            {% if not gen.llm_used %}<span class="muted" title="LLM niet bereikbaar; standaardtekst gebruikt">(template)</span>{% endif %}
+          </div>
+        {% elif gen and gen.state == "running" %}
+          <span class="muted">genereren... (ververs de pagina)</span>
+        {% elif gen and gen.state == "error" %}
+          <span class="err" title="{{ gen.error }}">fout</span>
+        {% else %}
+          <form method="post" action="/jobs/{{ j.job_id }}/generate" class="inline">
+            <button class="small" type="submit">CV + brief</button>
+          </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+{% endblock %}
