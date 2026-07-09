@@ -65,6 +65,9 @@ def main():
     assert r.status_code == 200
     print("PASS scrape log endpoint")
 
+    assert "Herscoor alles" in client.get("/").text
+    print("PASS rescore button present")
+
     print("\nAll webapp tests passed.")
 
 

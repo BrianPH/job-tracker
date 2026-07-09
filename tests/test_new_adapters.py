@@ -2,6 +2,8 @@
 and html adapters (parsers only — no network)."""
 from jobtracker.adapters import (
     extract_html_links,
+    parse_adzuna_job,
+    parse_jooble_job,
     parse_academictransfer_result,
     parse_greenhouse_job,
     parse_lever_posting,
@@ -127,6 +129,46 @@ def test_extract_html_links():
     print("PASS test_extract_html_links (pattern + dedup)")
 
 
+def test_parse_adzuna():
+    item = {
+        "id": "4321",
+        "title": "Junior <strong>Software</strong> Developer",
+        "description": "Build web applications in C# and Python...",
+        "redirect_url": "https://www.adzuna.nl/land/ad/4321",
+        "company": {"display_name": "TechBV"},
+        "location": {"display_name": "Rotterdam, Zuid-Holland"},
+        "salary_min": 38000.0, "salary_max": 48000.0,
+        "created": "2026-07-01T12:00:00Z",
+    }
+    job = parse_adzuna_job(item)
+    assert job.job_id == "adzuna:4321"
+    assert job.title == "Junior Software Developer"       # <strong> stripped
+    assert job.company == "TechBV" and "Rotterdam" in job.location
+    assert job.salary == "38000-48000 EUR"
+    assert job.posted_date == "2026-07-01"
+    print("PASS test_parse_adzuna")
+
+
+def test_parse_jooble():
+    item = {
+        "id": 987654,
+        "title": "Bioinformatician (Remote)",
+        "location": "Netherlands",
+        "snippet": "Analyse <b>NGS</b> data and build pipelines in Python.",
+        "salary": "", "source": "example.nl", "type": "Full-time",
+        "link": "https://jooble.org/desc/987654",
+        "company": "BioTech NL",
+        "updated": "2026-07-05T00:00:00.0000000",
+    }
+    job = parse_jooble_job(item)
+    assert job.job_id == "jooble:987654"
+    assert job.remote                                     # "Remote" in title
+    assert job.company == "BioTech NL"
+    assert "NGS" in job.description and "<b>" not in job.description
+    assert job.posted_date == "2026-07-05"
+    print("PASS test_parse_jooble")
+
+
 def test_salary_setpoint():
     assert parse_salary_max("50000-60000 EUR") == 60000
     assert parse_salary_max("€3.500 - €4.500 per month") == 54000
@@ -151,5 +193,7 @@ if __name__ == "__main__":
     test_parse_remoteok()
     test_parse_academictransfer()
     test_extract_html_links()
+    test_parse_adzuna()
+    test_parse_jooble()
     test_salary_setpoint()
     print("\nAll new-adapter tests passed.")

@@ -92,6 +92,8 @@ Keep `config/candidate.yaml` up to date when your CV changes.
 | lever | Zapier, 1Password | public JSON |
 | remotive | software-dev + bioinformatics searches | public JSON (remote, international) |
 | remoteok | tag-filtered (python/backend/dev) | public JSON (remote, international) |
+| adzuna | NL software + bioinformatics searches | official API, free key (aggregator) |
+| jooble | NL software + bioinformatics searches | official API, free key (aggregator) |
 | academictransfer | LUMC, Erasmus MC, Naturalis | public search API (best-effort) |
 | html | BaseClear, The Hyve, Single Cell Discoveries | generic anchor scraper |
 
@@ -102,6 +104,13 @@ source only logs an error; the rest of the run continues.
 
 International remote roles are kept by the rule `always_keep_remote: true` even
 when they don't match your location list.
+
+**Aggregators (LinkedIn-adjacent coverage):** Adzuna and Jooble index most major
+job boards, including much of what LinkedIn shows. Both need a free API key in
+`.env` (`ADZUNA_APP_ID`/`ADZUNA_APP_KEY` from developer.adzuna.com, `JOOBLE_KEY`
+from jooble.org/api/about); until keys are set those sources just log an error
+and the rest of the run continues. Add more searches or countries by copying the
+entries in `companies.yaml` (Adzuna: `country: gb`, `us`, etc.).
 
 ---
 
@@ -136,8 +145,11 @@ For each vacancy the model picks the single best-matching path and scores the
 job against that path alone, so a pure DevOps role is no longer punished for
 not being bioinformatics. The chosen persona is stored and shown in the web UI.
 `persona_constraints` holds rules that apply to every path (e.g. seniority).
-Only new jobs are scored per run. `--rescore` re-scores everything (do this
-once after changing personas), `--no-score` skips scoring.
+Only new jobs are scored per run; existing scores are preserved on re-scrapes
+by design — so **changing the model or personas does not update old scores
+automatically**. Use the **"Herscoor alles"** button in the web UI (or
+`python run.py --rescore`) after switching `OLLAMA_MODEL` or editing personas.
+`--no-score` skips scoring.
 
 **Test the scoring quickly** with realistic sample vacancies:
 

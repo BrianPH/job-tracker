@@ -17,11 +17,19 @@
     <button type="submit">Filter</button>
     <a href="/" class="muted">reset</a>
   </form>
-  <form method="post" action="/scrape" class="inline scrape-form" style="float:right; margin-top:-30px">
-    <button type="submit" {% if scrape.running %}disabled{% endif %}>
-      {% if scrape.running %}Scrapen bezig...{% else %}Scrape nu{% endif %}
-    </button>
-  </form>
+  <div class="scrape-form" style="float:right; margin-top:-30px; display:flex; gap:6px">
+    <form method="post" action="/scrape" class="inline">
+      <button type="submit" {% if scrape.running %}disabled{% endif %}>
+        {% if scrape.running %}Bezig...{% else %}Scrape nu{% endif %}
+      </button>
+    </form>
+    <form method="post" action="/rescore" class="inline"
+          onsubmit="return confirm('Alle vacatures opnieuw scoren met het huidige model en de huidige personas? Dit kan even duren.')">
+      <button type="submit" {% if scrape.running %}disabled{% endif %}
+              title="Gebruik dit na het wisselen van model of aanpassen van personas"
+              style="background:#5a7ea6">Herscoor alles</button>
+    </form>
+  </div>
   {% if scrape.running or scrape.log %}
     <p class="muted" style="margin:8px 0 0; clear:both">
       {% if scrape.running %}Pipeline draait — {% endif %}

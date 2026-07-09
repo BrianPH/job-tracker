@@ -102,6 +102,15 @@ def scrape():
     return RedirectResponse("/", status_code=303)
 
 
+@app.post("/rescore")
+def rescore():
+    """Full re-score: run the pipeline scoring ALL kept jobs again. Use after
+    changing the model (OLLAMA_MODEL) or the personas in profile.yaml —
+    existing scores are otherwise preserved on re-scrapes by design."""
+    start_scrape(rescore=True)
+    return RedirectResponse("/", status_code=303)
+
+
 @app.get("/scrape/log", response_class=HTMLResponse)
 def scrape_log():
     state = "bezig..." if SCRAPE["running"] else "klaar"

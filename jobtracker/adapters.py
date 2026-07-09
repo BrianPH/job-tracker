@@ -1,7 +1,7 @@
 """Source adapters. Each returns a list[Job] for one company.
 
 Implemented: recruitee, workday, teamtailor, greenhouse, lever, remotive,
-remoteok, academictransfer, html.
+remoteok, adzuna, jooble, academictransfer, html.
 The runner dispatches on the `adapter` field in companies.yaml.
 """
 from __future__ import annotations
@@ -490,6 +490,109 @@ def fetch_html(company: str, params: dict) -> List[Job]:
     return jobs
 
 
+
+# --------------------------------------------------------------------------- #
+# Adzuna  (aggregator: indexes many boards incl. much of what LinkedIn shows)  #
+# Official free API: https://developer.adzuna.com — set ADZUNA_APP_ID and      #
+# ADZUNA_APP_KEY in .env. Docs: /v1/api/jobs/{country}/search/{page}           #
+# --------------------------------------------------------------------------- #
+def parse_adzuna_job(item: dict) -> Job:
+    comp = item.get("company") or {}
+    loc = item.get("location") or {}
+    salary = ""
+    if item.get("salary_min") or item.get("salary_max"):
+        smin = int(item["salary_min"]) if item.get("salary_min") else ""
+        smax = int(item["salary_max"]) if item.get("salary_max") else ""
+        salary = f"{smin}-{smax} EUR".strip("-")
+    title = (item.get("title") or "").replace("<strong>", "").replace("</strong>", "")
+    return Job(
+        title=title.strip(),
+        company=comp.get("display_name") or "",
+        source="Adzuna",
+        url=item.get("redirect_url") or "",
+        location=loc.get("display_name") or "",
+        remote="remote" in (title + " " + str(loc.get("display_name") or "")).lower(),
+        salary=salary,
+        description=html_to_text(item.get("description")),
+        posted_date=(item.get("created") or "")[:10],
+        job_id=f"adzuna:{item.get('id')}",
+    )
+
+
+def fetch_adzuna(company: str, params: dict) -> List[Job]:
+    import os
+    app_id = os.getenv("ADZUNA_APP_ID", "")
+    app_key = os.getenv("ADZUNA_APP_KEY", "")
+    if not app_id or not app_key:
+        raise RuntimeError("set ADZUNA_APP_ID and ADZUNA_APP_KEY in .env "
+                           "(free key: https://developer.adzuna.com)")
+    country = params.get("country", "nl")
+    what = params.get("what", "")
+    where = params.get("where", "")
+    max_results = int(params.get("max_results", 100))
+    per_page = 50
+
+    jobs: List[Job] = []
+    page = 1
+    while len(jobs) < max_results:
+        q = {"app_id": app_id, "app_key": app_key,
+             "results_per_page": str(per_page), "content-type": "application/json"}
+        if what:
+            q["what"] = what
+        if where:
+            q["where"] = where
+        resp = requests.get(f"https://api.adzuna.com/v1/api/jobs/{country}/search/{page}",
+                            params=q, headers=BROWSER_HEADERS, timeout=TIMEOUT)
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if not results:
+            break
+        jobs.extend(parse_adzuna_job(r) for r in results)
+        if len(results) < per_page:
+            break
+        page += 1
+    return jobs[:max_results]
+
+
+# --------------------------------------------------------------------------- #
+# Jooble  (aggregator, international)                                          #
+# Official free API: https://jooble.org/api/about — set JOOBLE_KEY in .env.    #
+# POST https://jooble.org/api/<key>  body {"keywords": ..., "location": ...}   #
+# --------------------------------------------------------------------------- #
+def parse_jooble_job(item: dict) -> Job:
+    title = (item.get("title") or "").strip()
+    loc = item.get("location") or ""
+    return Job(
+        title=title,
+        company=item.get("company") or "",
+        source="Jooble",
+        url=item.get("link") or "",
+        location=loc,
+        remote="remote" in (title + " " + loc + " " + str(item.get("type") or "")).lower(),
+        salary=str(item.get("salary") or ""),
+        description=html_to_text(item.get("snippet")),
+        posted_date=str(item.get("updated") or "")[:10],
+        job_id=f"jooble:{item.get('id')}",
+    )
+
+
+def fetch_jooble(company: str, params: dict) -> List[Job]:
+    import os
+    key = os.getenv("JOOBLE_KEY", "")
+    if not key:
+        raise RuntimeError("set JOOBLE_KEY in .env (free key: https://jooble.org/api/about)")
+    body = {"keywords": params.get("keywords", ""),
+            "location": params.get("location", "")}
+    if params.get("page"):
+        body["page"] = str(params["page"])
+    resp = requests.post(f"https://jooble.org/api/{key}", json=body,
+                         headers=BROWSER_HEADERS, timeout=TIMEOUT)
+    resp.raise_for_status()
+    items = resp.json().get("jobs", [])
+    limit = int(params.get("limit", 100))
+    return [parse_jooble_job(it) for it in items][:limit]
+
+
 ADAPTERS: Dict[str, Callable[[str, dict], List[Job]]] = {
     "recruitee": fetch_recruitee,
     "workday": fetch_workday,
@@ -498,6 +601,8 @@ ADAPTERS: Dict[str, Callable[[str, dict], List[Job]]] = {
     "lever": fetch_lever,
     "remotive": fetch_remotive,
     "remoteok": fetch_remoteok,
+    "adzuna": fetch_adzuna,
+    "jooble": fetch_jooble,
     "academictransfer": fetch_academictransfer,
     "html": fetch_html,
 }
