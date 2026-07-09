@@ -30,26 +30,6 @@ jobs:
           # (named volumes pgdata/ollama are NOT touched)
           docker system prune -f
 
-      - name: Pull base images (sequential, with retries)
-        env:
-          COMPOSE_PARALLEL_LIMIT: "1"   # extract one large layer at a time (kind to the SD card)
-        run: |
-          set -e
-          for svc in db ollama; do
-            ok=0
-            for i in 1 2 3; do
-              echo "::group::pull $svc (attempt $i)"
-              if timeout 900 docker compose pull "$svc"; then ok=1; echo "::endgroup::"; break; fi
-              echo "::endgroup::"
-              echo "pull of $svc failed (attempt $i); retrying in 30s..."
-              sleep 30
-            done
-            if [ "$ok" -ne 1 ]; then
-              echo "Could not pull $svc after 3 attempts (check disk space / Docker Hub rate limit)."
-              exit 1
-            fi
-          done
-
       - name: Build app image
         run: docker compose build app
 
