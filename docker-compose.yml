@@ -58,6 +58,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # Inject everything from .env (API keys etc.) into the container.
+    env_file:
+      - .env
+    # These override any same-named keys in .env so container networking is correct:
+    # inside the stack the DB and Ollama are reached by service name, not localhost.
     environment:
       LLM_BACKEND: ollama
       OLLAMA_HOST: "http://ollama:11434"
