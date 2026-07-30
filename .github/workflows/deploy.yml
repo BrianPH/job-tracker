@@ -27,7 +27,7 @@ jobs:
           df -h .
           docker system df || true
           # remove stopped containers + dangling images from earlier failed runs
-          # (named volumes pgdata/ollama are NOT touched)
+          # (named volume pgdata is NOT touched)
           docker system prune -f
 
       - name: Build app image
@@ -42,5 +42,8 @@ jobs:
       - name: Deploy (images already local — no pull/build here)
         run: docker compose up -d --no-build --pull never
 
-      - name: Prune dangling images
-        run: docker image prune -f
+      - name: Prune dangling images and old build cache
+        if: always()
+        run: |
+          docker image prune -f
+          docker builder prune -f --keep-storage 2GB

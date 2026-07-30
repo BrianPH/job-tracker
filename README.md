@@ -130,14 +130,22 @@ survive every re-scrape. Verify end-to-end: `python -m tests.test_postgres_integ
 
 ## LLM fit-scoring + generation — local model, free
 
+The stack no longer runs its own Ollama container. It uses the Ollama
+instance installed on the Pi host (shared with CHESHIRE), reached from the
+app container via `host.docker.internal:11434`. One-time host setup:
+
 ```bash
-docker compose up -d                                  # Ollama on :11434
-docker compose exec ollama ollama pull llama3.2:1b    # ~1.3 GB, tiny + fast
+ollama pull qwen2.5:3b        # shared scoring/generation model (~1.9 GB)
+# free RAM quickly after each request:
+sudo systemctl edit ollama    # add: Environment="OLLAMA_KEEP_ALIVE=30s"
+sudo systemctl restart ollama
 ```
 
-`.env` defaults already point at local Ollama. For better letters/scores use a
-larger model (`qwen2.5:3b`, `llama3.2:3b`) and set `OLLAMA_MODEL`. Set
-`LLM_BACKEND=anthropic` + `ANTHROPIC_API_KEY` for the hosted option.
+The compose file defaults to `qwen2.5:3b`; override with `OLLAMA_MODEL` in
+`.env` if you want a different model. Set `LLM_BACKEND=anthropic` +
+`ANTHROPIC_API_KEY` for the hosted option. When running outside Docker
+(`python run_web.py` on the host), the default `http://localhost:11434`
+reaches the same instance directly.
 
 Scoring is **persona-based**: `config/profile.yaml` defines your career paths
 (personas) — e.g. Bioinformatics, .NET Developer, Cloud/DevOps, Data Engineer.
