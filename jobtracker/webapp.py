@@ -67,10 +67,14 @@ def start_scrape(rescore: bool = False) -> bool:
 # --- routes ------------------------------------------------------------------ #
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, status: str = "", company: str = "", source: str = "",
-          q: str = "", min_score: Optional[int] = None, remote: int = 0):
+          q: str = "", min_score: str = "", remote: int = 0):
     store = _store()
+    try:
+        min_score_val = int(min_score) if min_score.strip() else None
+    except ValueError:
+        min_score_val = None
     jobs = store.fetch(status=status or None, company=company or None,
-                       min_score=min_score)
+                       min_score=min_score_val)
     if source:
         jobs = [j for j in jobs if (j.get("source") or "").lower() == source.lower()]
     if q:
@@ -84,7 +88,7 @@ def index(request: Request, status: str = "", company: str = "", source: str = "
     return templates.TemplateResponse(request, "index.html", {
         "jobs": jobs, "statuses": STATUSES, "sources": sources,
         "flt": {"status": status, "company": company, "source": source,
-                "q": q, "min_score": min_score or "", "remote": remote},
+                "q": q, "min_score": min_score, "remote": remote},
         "scrape": SCRAPE, "generation": GENERATION,
     })
 

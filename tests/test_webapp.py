@@ -48,6 +48,11 @@ def main():
     assert "Bioinformatician" in r.text and "Remote Python Dev" not in r.text
     print("PASS min_score filter")
 
+    r = client.get("/?status=&company=&source=&q=&min_score=&remote=0")
+    assert r.status_code == 200
+    assert "Bioinformatician" in r.text and "Remote Python Dev" in r.text
+    print("PASS empty min_score does not error")
+
     r = client.get("/?remote=1")
     assert "Remote Python Dev" in r.text and "Bioinformatician" not in r.text
     print("PASS remote filter")
