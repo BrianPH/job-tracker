@@ -70,6 +70,12 @@
       <td data-label="Geplaatst" {% if not j.posted_date %}class="empty-mobile"{% endif %}><span class="muted">{{ j.posted_date or "—" }}</span></td>
       <td data-label="Status">
         <form method="post" action="/jobs/{{ j.job_id }}/status" class="inline">
+          <input type="hidden" name="f_status" value="{{ flt.status }}">
+          <input type="hidden" name="f_company" value="{{ flt.company }}">
+          <input type="hidden" name="f_source" value="{{ flt.source }}">
+          <input type="hidden" name="f_q" value="{{ flt.q }}">
+          <input type="hidden" name="f_min_score" value="{{ flt.min_score }}">
+          <input type="hidden" name="f_remote" value="{{ flt.remote }}">
           <select name="status" onchange="this.form.submit()">
             {% for s in statuses %}<option value="{{ s }}" {% if j.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
           </select>

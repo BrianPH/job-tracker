@@ -17,6 +17,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
 
 import yaml
 from fastapi import BackgroundTasks, FastAPI, Form, Request
@@ -94,10 +95,17 @@ def index(request: Request, status: str = "", company: str = "", source: str = "
 
 
 @app.post("/jobs/{job_id}/status")
-def set_status(job_id: str, status: str = Form(...)):
+def set_status(job_id: str, status: str = Form(...),
+               f_status: str = Form(""), f_company: str = Form(""), f_source: str = Form(""),
+               f_q: str = Form(""), f_min_score: str = Form(""), f_remote: str = Form("")):
     if status in STATUSES:
         _store().update_status(job_id, status)
-    return RedirectResponse("/", status_code=303)
+    params = {k: v for k, v in {
+        "status": f_status, "company": f_company, "source": f_source,
+        "q": f_q, "min_score": f_min_score, "remote": f_remote,
+    }.items() if v}
+    target = f"/?{urlencode(params)}" if params else "/"
+    return RedirectResponse(target, status_code=303)
 
 
 @app.post("/scrape")

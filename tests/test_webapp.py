@@ -62,6 +62,14 @@ def main():
     assert json.loads(store_path.read_text())["test:1"]["status"] == "Applied"
     print("PASS status update persists")
 
+    r = client.post("/jobs/test:2/status", data={
+        "status": "Rejected", "f_min_score": "50", "f_remote": "1",
+    }, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/?min_score=50&remote=1"
+    assert json.loads(store_path.read_text())["test:2"]["status"] == "Rejected"
+    print("PASS status update preserves active filters")
+
     r = client.get("/settings")
     assert r.status_code == 200 and "Minimum salaris" in r.text
     print("PASS settings page renders setpoints")
