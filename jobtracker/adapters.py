@@ -423,6 +423,12 @@ def fetch_academictransfer(company: str, params: dict) -> List[Job]:
 # the rule filter and LLM scorer have a description to work with.              #
 # --------------------------------------------------------------------------- #
 _GENERIC_LINK_WORDS = ("vacature", "vacancy", "job", "career", "position", "werken-bij")
+# Card-style listings (e.g. "<h3>Role</h3>...<a title='Role'>Read more</a>") often
+# give the anchor only a generic call-to-action as text; the real title usually
+# lives in the anchor's `title` attribute instead.
+_GENERIC_LINK_TEXT = {"read more", "learn more", "more info", "more information",
+                       "details", "view", "view job", "view details", "apply",
+                       "apply now", "see more", "continue reading"}
 
 
 def _absolute_url(base: str, href: str) -> str:
@@ -439,6 +445,10 @@ def extract_html_links(page_html: str, base_url: str, link_pattern: str = "") ->
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         title = " ".join(a.get_text(" ", strip=True).split())
+        if title.lower() in _GENERIC_LINK_TEXT:
+            title_attr = " ".join((a.get("title") or "").split())
+            if title_attr:
+                title = title_attr
         if not title or len(title) > 120 or href.startswith(("mailto:", "tel:", "#", "javascript:")):
             continue
         url = _absolute_url(base_url, href)
