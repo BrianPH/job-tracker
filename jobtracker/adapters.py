@@ -1,7 +1,7 @@
 """Source adapters. Each returns a list[Job] for one company.
 
-Implemented: recruitee, workday, teamtailor, greenhouse, lever, remotive,
-remoteok, adzuna, jooble, academictransfer, html.
+Implemented: recruitee, workday, teamtailor, greenhouse, lever, ashby,
+smartrecruiters, remotive, remoteok, adzuna, jooble, academictransfer, html.
 The runner dispatches on the `adapter` field in companies.yaml.
 """
 from __future__ import annotations
@@ -297,6 +297,117 @@ def fetch_lever(company: str, params: dict) -> List[Job]:
 
 
 # --------------------------------------------------------------------------- #
+# Ashby  (Mollie, Zapier)                                                      #
+# Public JSON, no auth: https://api.ashbyhq.com/posting-api/job-board/<token>  #
+# --------------------------------------------------------------------------- #
+def parse_ashby_job(item: dict, company: str) -> Job:
+    loc = item.get("location") or ""
+    secondary = [s.get("location", "") for s in (item.get("secondaryLocations") or [])
+                 if isinstance(s, dict) and s.get("location")]
+    if secondary:
+        loc = ", ".join([loc, *secondary]) if loc else ", ".join(secondary)
+    workplace = (item.get("workplaceType") or "").lower()
+    remote = bool(item.get("isRemote")) or "remote" in workplace
+    return Job(
+        title=(item.get("title") or "").strip(),
+        company=company,
+        source="Ashby",
+        url=item.get("jobUrl") or item.get("applyUrl") or "",
+        location=loc,
+        remote=remote,
+        description=html_to_text(item.get("descriptionHtml")),
+        posted_date=(item.get("publishedAt") or "")[:10],
+        job_id=f"ashby:{item.get('id')}",
+    )
+
+
+def fetch_ashby(company: str, params: dict) -> List[Job]:
+    token = params["token"]
+    url = f"https://api.ashbyhq.com/posting-api/job-board/{token}"
+    resp = requests.get(url, headers=BROWSER_HEADERS, timeout=TIMEOUT)
+    resp.raise_for_status()
+    jobs = resp.json().get("jobs", [])
+    return [parse_ashby_job(j, company) for j in jobs if j.get("isListed", True)]
+
+
+# --------------------------------------------------------------------------- #
+# SmartRecruiters  (DNAnexus, Genomics England)                                #
+# Public JSON, no auth: https://api.smartrecruiters.com/v1/companies/<id>/postings #
+# Company identifiers are case-sensitive (e.g. "GenomicsEngland").             #
+# --------------------------------------------------------------------------- #
+def parse_smartrecruiters_posting(item: dict, company: str, company_id: str = "") -> Job:
+    loc = item.get("location") or {}
+    loc_str = loc.get("fullLocation") or ", ".join(
+        p for p in (loc.get("city"), loc.get("region"), loc.get("country")) if p)
+    posting_id = item.get("id", "")
+    identifier = (item.get("company") or {}).get("identifier") or company_id
+    return Job(
+        title=(item.get("name") or "").strip(),
+        company=(item.get("company") or {}).get("name") or company,
+        source="SmartRecruiters",
+        url=f"https://jobs.smartrecruiters.com/{identifier}/{posting_id}",
+        location=loc_str,
+        remote=bool(loc.get("remote")),
+        posted_date=(item.get("releasedDate") or "")[:10],
+        job_id=f"smartrecruiters:{posting_id}",
+    )
+
+
+def apply_smartrecruiters_detail(job: Job, info: dict) -> Job:
+    """Merge fields from a single-posting detail payload into an existing Job."""
+    if not info:
+        return job
+    if info.get("postingUrl"):
+        job.url = info["postingUrl"]
+    sections = (info.get("jobAd") or {}).get("sections") or {}
+    desc = html_to_text((sections.get("jobDescription") or {}).get("text"))
+    quals = html_to_text((sections.get("qualifications") or {}).get("text"))
+    if quals:
+        desc = f"{desc}\n\nQualifications:\n{quals}".strip()
+    if desc:
+        job.description = desc
+    return job
+
+
+def fetch_smartrecruiters(company: str, params: dict) -> List[Job]:
+    company_id = params["company"]
+    max_results = int(params.get("max_results", 100))
+    want_detail = params.get("descriptions", True)
+
+    base = f"https://api.smartrecruiters.com/v1/companies/{company_id}/postings"
+    session = requests.Session()
+    session.headers.update(BROWSER_HEADERS)
+
+    jobs: List[Job] = []
+    offset, total = 0, None
+    while offset < max_results:
+        page_limit = min(100, max_results - offset)
+        resp = session.get(base, params={"offset": offset, "limit": page_limit}, timeout=TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        total = data.get("totalFound", 0)
+        postings = data.get("content", [])
+        if not postings:
+            break
+        for p in postings:
+            if len(jobs) >= max_results:
+                break
+            job = parse_smartrecruiters_posting(p, company, company_id)
+            if want_detail and p.get("id"):
+                try:
+                    d = session.get(f"{base}/{p['id']}", timeout=TIMEOUT)
+                    d.raise_for_status()
+                    apply_smartrecruiters_detail(job, d.json())
+                except requests.RequestException:
+                    pass  # keep the list-level job even if detail fails
+            jobs.append(job)
+        offset += page_limit
+        if total is not None and offset >= total:
+            break
+    return jobs
+
+
+# --------------------------------------------------------------------------- #
 # Remotive  (international remote board)                                       #
 # Public JSON, no auth: https://remotive.com/api/remote-jobs                    #
 # --------------------------------------------------------------------------- #
@@ -423,6 +534,16 @@ def fetch_academictransfer(company: str, params: dict) -> List[Job]:
 # the rule filter and LLM scorer have a description to work with.              #
 # --------------------------------------------------------------------------- #
 _GENERIC_LINK_WORDS = ("vacature", "vacancy", "job", "career", "position", "werken-bij")
+# Card-style listings (e.g. "<h3>Role</h3>...<a title='Role'>Read more</a>") often
+# give the anchor only a generic call-to-action as text; the real title usually
+# lives in the anchor's `title` attribute instead.
+_GENERIC_LINK_TEXT = {"read more", "learn more", "more info", "more information",
+                       "details", "view", "view job", "view details", "apply",
+                       "apply now", "see more", "continue reading",
+                       # Dutch equivalents -- several active html-adapter sources
+                       # (NKI, Hartwig, UMCG) are Dutch-language.
+                       "lees meer", "meer info", "meer informatie", "bekijk",
+                       "bekijk vacature", "solliciteer", "solliciteer nu"}
 
 
 def _absolute_url(base: str, href: str) -> str:
@@ -439,6 +560,10 @@ def extract_html_links(page_html: str, base_url: str, link_pattern: str = "") ->
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         title = " ".join(a.get_text(" ", strip=True).split())
+        if title.lower() in _GENERIC_LINK_TEXT:
+            title_attr = " ".join((a.get("title") or "").split())
+            if title_attr:
+                title = title_attr
         if not title or len(title) > 120 or href.startswith(("mailto:", "tel:", "#", "javascript:")):
             continue
         url = _absolute_url(base_url, href)
@@ -599,6 +724,8 @@ ADAPTERS: Dict[str, Callable[[str, dict], List[Job]]] = {
     "teamtailor": fetch_teamtailor,
     "greenhouse": fetch_greenhouse,
     "lever": fetch_lever,
+    "ashby": fetch_ashby,
+    "smartrecruiters": fetch_smartrecruiters,
     "remotive": fetch_remotive,
     "remoteok": fetch_remoteok,
     "adzuna": fetch_adzuna,

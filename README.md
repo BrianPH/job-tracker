@@ -85,22 +85,36 @@ Keep `config/candidate.yaml` up to date when your CV changes.
 
 | Adapter | Companies (enabled) | API |
 |---|---|---|
-| recruitee | GenomeScan, Leyden Labs | public JSON |
-| teamtailor | HUB Organoids | public JSON feed |
-| workday | Amgen, Janssen/J&J, Biogen | CXS JSON |
-| greenhouse | Adyen, GitLab, Elastic, Mollie | public JSON |
-| lever | Zapier, 1Password | public JSON |
+| recruitee | GenomeScan, Leyden Labs, ENPICOM | public JSON |
+| teamtailor | none currently (HUB Organoids disabled, see below) | public JSON feed |
+| workday | Amgen, Janssen/J&J, Biogen, Illumina, Genmab, Wellcome Sanger Institute, EMBL/EMBL-EBI, Velsera, Intellia Therapeutics, CRISPR Therapeutics | CXS JSON |
+| greenhouse | Adyen, GitLab, Elastic, Altos Labs, NewLimit, Calico Life Sciences | public JSON |
+| lever | 1Password, Retro Biosciences | public JSON |
+| ashby | Mollie, Zapier | public JSON |
+| smartrecruiters | DNAnexus, Genomics England | public JSON |
 | remotive | software-dev + bioinformatics searches | public JSON (remote, international) |
 | remoteok | tag-filtered (python/backend/dev) | public JSON (remote, international) |
 | adzuna | NL software + bioinformatics searches | official API, free key (aggregator) |
 | jooble | NL software + bioinformatics searches | official API, free key (aggregator) |
-| academictransfer | LUMC, Erasmus MC, Naturalis | public search API (best-effort) |
-| html | BaseClear, The Hyve, Single Cell Discoveries | generic anchor scraper |
+| academictransfer | none currently (LUMC/Erasmus MC/Naturalis disabled, see below) | public search API (best-effort) |
+| html | The Hyve, NKI, Hartwig Medical Foundation, UMCG/ERIBA | generic anchor scraper |
 
 Adding a company on an existing platform = one entry in `config/companies.yaml`.
 Verify a Greenhouse board via `https://boards-api.greenhouse.io/v1/boards/<board>/jobs`,
-a Lever slug via `https://api.lever.co/v0/postings/<slug>?mode=json`. A failing
-source only logs an error; the rest of the run continues.
+a Lever slug via `https://api.lever.co/v0/postings/<slug>?mode=json`, an Ashby
+token via `https://api.ashbyhq.com/posting-api/job-board/<token>`, or a
+SmartRecruiters company id via
+`https://api.smartrecruiters.com/v1/companies/<id>/postings` (identifiers are
+case-sensitive). A failing source only logs an error; the rest of the run
+continues.
+
+Mollie and Zapier moved from Greenhouse/Lever to Ashby. HUB Organoids
+(Teamtailor, custom domain), BaseClear and Single Cell Discoveries (both
+`html`), and AcademicTransfer's three Dutch institutes (LUMC, Erasmus MC,
+Naturalis) are disabled in `config/companies.yaml`, each with a comment
+that explains the reason: their source sites return genuine errors, or
+their page structure cannot be scraped by the generic adapters. A URL
+change alone does not fix these.
 
 International remote roles are kept by the rule `always_keep_remote: true` even
 when they don't match your location list.

@@ -129,6 +129,38 @@ def test_extract_html_links():
     print("PASS test_extract_html_links (pattern + dedup)")
 
 
+def test_extract_html_links_generic_cta_uses_title_attr():
+    html = """
+    <html><body>
+      <div class="card">
+        <h3>QA/RA Lead</h3>
+        <a href="/en/vacancies/qa-ra-lead/" title="QA/RA Lead">Read more</a>
+      </div>
+      <a href="/en/vacancies/legal-counsel/" title="Legal Counsel">Read more</a>
+      <a href="/en/vacancies/feed/">Feed</a>
+    </body></html>"""
+    links = extract_html_links(html, "https://example.com/en/vacancies/",
+                                link_pattern="/en/vacancies/(?!feed)[a-z0-9-]+/?$")
+    by_url = {url: title for title, url in links}
+    assert by_url["https://example.com/en/vacancies/qa-ra-lead/"] == "QA/RA Lead"
+    assert by_url["https://example.com/en/vacancies/legal-counsel/"] == "Legal Counsel"
+    assert not any("feed" in u for u in by_url)
+    print("PASS test_extract_html_links_generic_cta_uses_title_attr")
+
+
+def test_extract_html_links_generic_cta_dutch():
+    html = """
+    <html><body>
+      <a href="/vacatures/data-engineer" title="Data Engineer">Lees meer</a>
+      <a href="/vacatures/qa-lead" title="QA Lead">Solliciteer nu</a>
+    </body></html>"""
+    links = extract_html_links(html, "https://example.nl/vacatures", link_pattern="/vacatures/[a-z-]")
+    by_url = {url: title for title, url in links}
+    assert by_url["https://example.nl/vacatures/data-engineer"] == "Data Engineer"
+    assert by_url["https://example.nl/vacatures/qa-lead"] == "QA Lead"
+    print("PASS test_extract_html_links_generic_cta_dutch")
+
+
 def test_parse_adzuna():
     item = {
         "id": "4321",
@@ -193,6 +225,8 @@ if __name__ == "__main__":
     test_parse_remoteok()
     test_parse_academictransfer()
     test_extract_html_links()
+    test_extract_html_links_generic_cta_uses_title_attr()
+    test_extract_html_links_generic_cta_dutch()
     test_parse_adzuna()
     test_parse_jooble()
     test_salary_setpoint()
