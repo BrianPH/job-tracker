@@ -324,8 +324,6 @@ def parse_ashby_job(item: dict, company: str) -> Job:
 def fetch_ashby(company: str, params: dict) -> List[Job]:
     token = params["token"]
     url = f"https://api.ashbyhq.com/posting-api/job-board/{token}"
-    if params.get("include_compensation"):
-        url += "?includeCompensation=true"
     resp = requests.get(url, headers=BROWSER_HEADERS, timeout=TIMEOUT)
     resp.raise_for_status()
     jobs = resp.json().get("jobs", [])
@@ -337,12 +335,12 @@ def fetch_ashby(company: str, params: dict) -> List[Job]:
 # Public JSON, no auth: https://api.smartrecruiters.com/v1/companies/<id>/postings #
 # Company identifiers are case-sensitive (e.g. "GenomicsEngland").             #
 # --------------------------------------------------------------------------- #
-def parse_smartrecruiters_posting(item: dict, company: str) -> Job:
+def parse_smartrecruiters_posting(item: dict, company: str, company_id: str = "") -> Job:
     loc = item.get("location") or {}
     loc_str = loc.get("fullLocation") or ", ".join(
         p for p in (loc.get("city"), loc.get("region"), loc.get("country")) if p)
     posting_id = item.get("id", "")
-    identifier = (item.get("company") or {}).get("identifier", "")
+    identifier = (item.get("company") or {}).get("identifier") or company_id
     return Job(
         title=(item.get("name") or "").strip(),
         company=(item.get("company") or {}).get("name") or company,
@@ -377,11 +375,14 @@ def fetch_smartrecruiters(company: str, params: dict) -> List[Job]:
     want_detail = params.get("descriptions", True)
 
     base = f"https://api.smartrecruiters.com/v1/companies/{company_id}/postings"
+    session = requests.Session()
+    session.headers.update(BROWSER_HEADERS)
+
     jobs: List[Job] = []
-    offset, limit, total = 0, 100, None
+    offset, total = 0, None
     while offset < max_results:
-        resp = requests.get(base, params={"offset": offset, "limit": limit},
-                            headers=BROWSER_HEADERS, timeout=TIMEOUT)
+        page_limit = min(100, max_results - offset)
+        resp = session.get(base, params={"offset": offset, "limit": page_limit}, timeout=TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
         total = data.get("totalFound", 0)
@@ -389,19 +390,21 @@ def fetch_smartrecruiters(company: str, params: dict) -> List[Job]:
         if not postings:
             break
         for p in postings:
-            job = parse_smartrecruiters_posting(p, company)
+            if len(jobs) >= max_results:
+                break
+            job = parse_smartrecruiters_posting(p, company, company_id)
             if want_detail and p.get("id"):
                 try:
-                    d = requests.get(f"{base}/{p['id']}", headers=BROWSER_HEADERS, timeout=TIMEOUT)
+                    d = session.get(f"{base}/{p['id']}", timeout=TIMEOUT)
                     d.raise_for_status()
                     apply_smartrecruiters_detail(job, d.json())
                 except requests.RequestException:
                     pass  # keep the list-level job even if detail fails
             jobs.append(job)
-        offset += limit
+        offset += page_limit
         if total is not None and offset >= total:
             break
-    return jobs[:max_results]
+    return jobs
 
 
 # --------------------------------------------------------------------------- #
