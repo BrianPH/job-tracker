@@ -148,6 +148,19 @@ def test_extract_html_links_generic_cta_uses_title_attr():
     print("PASS test_extract_html_links_generic_cta_uses_title_attr")
 
 
+def test_extract_html_links_generic_cta_dutch():
+    html = """
+    <html><body>
+      <a href="/vacatures/data-engineer" title="Data Engineer">Lees meer</a>
+      <a href="/vacatures/qa-lead" title="QA Lead">Solliciteer nu</a>
+    </body></html>"""
+    links = extract_html_links(html, "https://example.nl/vacatures", link_pattern="/vacatures/[a-z-]")
+    by_url = {url: title for title, url in links}
+    assert by_url["https://example.nl/vacatures/data-engineer"] == "Data Engineer"
+    assert by_url["https://example.nl/vacatures/qa-lead"] == "QA Lead"
+    print("PASS test_extract_html_links_generic_cta_dutch")
+
+
 def test_parse_adzuna():
     item = {
         "id": "4321",
@@ -213,6 +226,7 @@ if __name__ == "__main__":
     test_parse_academictransfer()
     test_extract_html_links()
     test_extract_html_links_generic_cta_uses_title_attr()
+    test_extract_html_links_generic_cta_dutch()
     test_parse_adzuna()
     test_parse_jooble()
     test_salary_setpoint()

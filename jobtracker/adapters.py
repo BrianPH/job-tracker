@@ -536,7 +536,11 @@ _GENERIC_LINK_WORDS = ("vacature", "vacancy", "job", "career", "position", "werk
 # lives in the anchor's `title` attribute instead.
 _GENERIC_LINK_TEXT = {"read more", "learn more", "more info", "more information",
                        "details", "view", "view job", "view details", "apply",
-                       "apply now", "see more", "continue reading"}
+                       "apply now", "see more", "continue reading",
+                       # Dutch equivalents -- several active html-adapter sources
+                       # (NKI, Hartwig, UMCG) are Dutch-language.
+                       "lees meer", "meer info", "meer informatie", "bekijk",
+                       "bekijk vacature", "solliciteer", "solliciteer nu"}
 
 
 def _absolute_url(base: str, href: str) -> str:
