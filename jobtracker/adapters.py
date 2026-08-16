@@ -1,7 +1,7 @@
 """Source adapters. Each returns a list[Job] for one company.
 
-Implemented: recruitee, workday, teamtailor, greenhouse, lever, remotive,
-remoteok, adzuna, jooble, academictransfer, html.
+Implemented: recruitee, workday, teamtailor, greenhouse, lever, ashby,
+smartrecruiters, remotive, remoteok, adzuna, jooble, academictransfer, html.
 The runner dispatches on the `adapter` field in companies.yaml.
 """
 from __future__ import annotations
@@ -294,6 +294,114 @@ def fetch_lever(company: str, params: dict) -> List[Job]:
     if not isinstance(data, list):
         return []
     return [parse_lever_posting(it, company) for it in data]
+
+
+# --------------------------------------------------------------------------- #
+# Ashby  (Mollie, Zapier)                                                      #
+# Public JSON, no auth: https://api.ashbyhq.com/posting-api/job-board/<token>  #
+# --------------------------------------------------------------------------- #
+def parse_ashby_job(item: dict, company: str) -> Job:
+    loc = item.get("location") or ""
+    secondary = [s.get("location", "") for s in (item.get("secondaryLocations") or [])
+                 if isinstance(s, dict) and s.get("location")]
+    if secondary:
+        loc = ", ".join([loc, *secondary]) if loc else ", ".join(secondary)
+    workplace = (item.get("workplaceType") or "").lower()
+    remote = bool(item.get("isRemote")) or "remote" in workplace
+    return Job(
+        title=(item.get("title") or "").strip(),
+        company=company,
+        source="Ashby",
+        url=item.get("jobUrl") or item.get("applyUrl") or "",
+        location=loc,
+        remote=remote,
+        description=html_to_text(item.get("descriptionHtml")),
+        posted_date=(item.get("publishedAt") or "")[:10],
+        job_id=f"ashby:{item.get('id')}",
+    )
+
+
+def fetch_ashby(company: str, params: dict) -> List[Job]:
+    token = params["token"]
+    url = f"https://api.ashbyhq.com/posting-api/job-board/{token}"
+    if params.get("include_compensation"):
+        url += "?includeCompensation=true"
+    resp = requests.get(url, headers=BROWSER_HEADERS, timeout=TIMEOUT)
+    resp.raise_for_status()
+    jobs = resp.json().get("jobs", [])
+    return [parse_ashby_job(j, company) for j in jobs if j.get("isListed", True)]
+
+
+# --------------------------------------------------------------------------- #
+# SmartRecruiters  (DNAnexus, Genomics England)                                #
+# Public JSON, no auth: https://api.smartrecruiters.com/v1/companies/<id>/postings #
+# Company identifiers are case-sensitive (e.g. "GenomicsEngland").             #
+# --------------------------------------------------------------------------- #
+def parse_smartrecruiters_posting(item: dict, company: str) -> Job:
+    loc = item.get("location") or {}
+    loc_str = loc.get("fullLocation") or ", ".join(
+        p for p in (loc.get("city"), loc.get("region"), loc.get("country")) if p)
+    posting_id = item.get("id", "")
+    identifier = (item.get("company") or {}).get("identifier", "")
+    return Job(
+        title=(item.get("name") or "").strip(),
+        company=(item.get("company") or {}).get("name") or company,
+        source="SmartRecruiters",
+        url=f"https://jobs.smartrecruiters.com/{identifier}/{posting_id}",
+        location=loc_str,
+        remote=bool(loc.get("remote")),
+        posted_date=(item.get("releasedDate") or "")[:10],
+        job_id=f"smartrecruiters:{posting_id}",
+    )
+
+
+def apply_smartrecruiters_detail(job: Job, info: dict) -> Job:
+    """Merge fields from a single-posting detail payload into an existing Job."""
+    if not info:
+        return job
+    if info.get("postingUrl"):
+        job.url = info["postingUrl"]
+    sections = (info.get("jobAd") or {}).get("sections") or {}
+    desc = html_to_text((sections.get("jobDescription") or {}).get("text"))
+    quals = html_to_text((sections.get("qualifications") or {}).get("text"))
+    if quals:
+        desc = f"{desc}\n\nQualifications:\n{quals}".strip()
+    if desc:
+        job.description = desc
+    return job
+
+
+def fetch_smartrecruiters(company: str, params: dict) -> List[Job]:
+    company_id = params["company"]
+    max_results = int(params.get("max_results", 100))
+    want_detail = params.get("descriptions", True)
+
+    base = f"https://api.smartrecruiters.com/v1/companies/{company_id}/postings"
+    jobs: List[Job] = []
+    offset, limit, total = 0, 100, None
+    while offset < max_results:
+        resp = requests.get(base, params={"offset": offset, "limit": limit},
+                            headers=BROWSER_HEADERS, timeout=TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        total = data.get("totalFound", 0)
+        postings = data.get("content", [])
+        if not postings:
+            break
+        for p in postings:
+            job = parse_smartrecruiters_posting(p, company)
+            if want_detail and p.get("id"):
+                try:
+                    d = requests.get(f"{base}/{p['id']}", headers=BROWSER_HEADERS, timeout=TIMEOUT)
+                    d.raise_for_status()
+                    apply_smartrecruiters_detail(job, d.json())
+                except requests.RequestException:
+                    pass  # keep the list-level job even if detail fails
+            jobs.append(job)
+        offset += limit
+        if total is not None and offset >= total:
+            break
+    return jobs[:max_results]
 
 
 # --------------------------------------------------------------------------- #
@@ -609,6 +717,8 @@ ADAPTERS: Dict[str, Callable[[str, dict], List[Job]]] = {
     "teamtailor": fetch_teamtailor,
     "greenhouse": fetch_greenhouse,
     "lever": fetch_lever,
+    "ashby": fetch_ashby,
+    "smartrecruiters": fetch_smartrecruiters,
     "remotive": fetch_remotive,
     "remoteok": fetch_remoteok,
     "adzuna": fetch_adzuna,
