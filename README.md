@@ -46,7 +46,14 @@ python -m tests.test_webapp
   re-scrapes.
 - **Instellingen (setpoints)** — edit keywords, exclusions, locations,
   **minimum salary**, remote rule, profile text and the daily scrape hour from
-  the browser. Saved to `config/profile.yaml`.
+  the browser. Saved to `config/profile.yaml`. Keyword/exclusion matching is
+  left-anchored, not plain substring: a keyword matches as a whole word or as
+  the start of a longer word (so a short keyword like `arts` no longer
+  wrongly matches inside `starts`/`parts`, and a deliberately short keyword
+  like `bioinformatic` still matches `bioinformatics`/`bioinformatician`),
+  but it will NOT match a keyword glued onto the END of a longer word (e.g.
+  `arts` alone does not match the compound `huisarts`) — list such compounds
+  as their own keyword instead.
 - **Scrape nu** — run the whole pipeline in the background; live log at
   `/scrape/log`.
 - **CV + brief** — per vacancy, generates a tailored CV and motivation letter
