@@ -105,6 +105,26 @@ companies:
                        huisarts, tandarts, basisarts]
       max_results: 40
 
+  # werkenvoornederland.nl (central government jobs site). No RSS/JSON API
+  # exists; the adapter reaches the site's own Hippo CMS results component
+  # directly -- see the comment above fetch_werkenvoornederland in
+  # jobtracker/adapters.py for how, and how to find another organisation's
+  # `werkgever` code. Verified 2026-11-24: 14 real RIVM postings, 5 real NFI
+  # postings, both server-side filtered (not a client-side/JS-only filter).
+  - name: RIVM
+    adapter: werkenvoornederland
+    enabled: true
+    params:
+      werkgever: "01760"
+      max_results: 40
+
+  - name: NFI
+    adapter: werkenvoornederland
+    enabled: true
+    params:
+      werkgever: "01487"
+      max_results: 40
+
 # Not resolved yet -- do not copy these in as-is. Each needs another pass with
 # check_source.py before it can be added (see issue #2 and the C1 PR
 # description for what was tried and why it didn't work on 2026-11-24):
