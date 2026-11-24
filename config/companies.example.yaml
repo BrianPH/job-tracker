@@ -27,7 +27,8 @@ companies:
                        bioinformatic, programmeur, ontwikkelaar]
       title_exclude: [phd, "ph.d.", promovendus, promotieplek, promotieonderzoek,
                        "doctoral candidate", verpleegkundige, arts, aios, anios,
-                       laborant, "physician assistant", anesthesiemedewerker]
+                       laborant, "physician assistant", anesthesiemedewerker,
+                       huisarts, tandarts, basisarts]
       max_results: 40
 
   # Same platform as TU Delft. HTML-adapter mechanism confirmed (200 OK), but
@@ -46,7 +47,8 @@ companies:
                        bioinformatic, programmeur, ontwikkelaar]
       title_exclude: [phd, "ph.d.", promovendus, promotieplek, promotieonderzoek,
                        "doctoral candidate", verpleegkundige, arts, aios, anios,
-                       laborant, "physician assistant", anesthesiemedewerker]
+                       laborant, "physician assistant", anesthesiemedewerker,
+                       huisarts, tandarts, basisarts]
       max_results: 40
 
   # Same caveat as KNAW, and worse: the English list id below returns zero
@@ -66,7 +68,8 @@ companies:
                        bioinformatic, programmeur, ontwikkelaar]
       title_exclude: [phd, "ph.d.", promovendus, promotieplek, promotieonderzoek,
                        "doctoral candidate", verpleegkundige, arts, aios, anios,
-                       laborant, "physician assistant", anesthesiemedewerker]
+                       laborant, "physician assistant", anesthesiemedewerker,
+                       huisarts, tandarts, basisarts]
       max_results: 40
 
   # Verified 2026-11-24: real vacancy links on the first page, matched by
@@ -81,7 +84,8 @@ companies:
                        bioinformatic, programmeur, ontwikkelaar]
       title_exclude: [phd, "ph.d.", promovendus, promotieplek, promotieonderzoek,
                        "doctoral candidate", verpleegkundige, arts, aios, anios,
-                       laborant, "physician assistant", anesthesiemedewerker]
+                       laborant, "physician assistant", anesthesiemedewerker,
+                       huisarts, tandarts, basisarts]
       max_results: 40
 
   # Verified 2026-11-24: 2 real vacancy links matched by
@@ -97,7 +101,8 @@ companies:
                        bioinformatic, programmeur, ontwikkelaar]
       title_exclude: [phd, "ph.d.", promovendus, promotieplek, promotieonderzoek,
                        "doctoral candidate", verpleegkundige, arts, aios, anios,
-                       laborant, "physician assistant", anesthesiemedewerker]
+                       laborant, "physician assistant", anesthesiemedewerker,
+                       huisarts, tandarts, basisarts]
       max_results: 40
 
 # Not resolved yet -- do not copy these in as-is. Each needs another pass with
