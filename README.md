@@ -31,6 +31,7 @@ python -m tests.test_storage_upsert
 python -m tests.test_scorer
 python -m tests.test_new_adapters
 python -m tests.test_example_configs
+python -m tests.test_werkenvoornederland
 python -m tests.test_generator
 python -m tests.test_webapp
 ```
@@ -106,6 +107,7 @@ Keep `config/candidate.yaml` up to date when your CV changes.
 | jooble | NL software + bioinformatics searches | official API, free key (aggregator) |
 | academictransfer | none currently (LUMC disabled, see below) | public search API (best-effort) |
 | html | The Hyve, NKI, Hartwig Medical Foundation, UMCG/ERIBA; TU Delft, Erasmus MC, Naturalis Biodiversity Center available in `config/companies.example.yaml`*; KNAW, Leiden University also in that file but disabled pending link-pattern verification | generic anchor scraper |
+| werkenvoornederland | RIVM, NFI available in `config/companies.example.yaml`* | Hippo CMS component-rendering fragment (no public API) |
 
 \* Entries in `config/companies.example.yaml` are reference-only -- copy the ones you want into your real `config/companies.yaml` before they're part of any actual run.
 
@@ -136,6 +138,17 @@ sources in that round (Erasmus University Rotterdam, UvA, VU Amsterdam, UMC
 Utrecht, Princess Máxima Center, the eScience Center, IKNL, TNO) could not be
 verified yet — their listings are either client-rendered, or the careers URL
 used in planning turned out to be wrong.
+
+**werkenvoornederland.nl** (the central government jobs site, covering RIVM
+and the Netherlands Forensic Institute) has no public API, RSS feed, or
+sitemap listing individual vacancies — its `/vacatures` page is a
+client-rendered shell. The `werkenvoornederland` adapter instead reaches the
+site's own Hippo CMS results component directly, using the same
+organisation-filter code (`werkgever=<numeric id>`) the site's own filter
+checkboxes use; see the comment above `fetch_werkenvoornederland` in
+`jobtracker/adapters.py` for exactly how, and how to find another
+organisation's code the same way. `config/companies.example.yaml` has the
+confirmed codes for RIVM and NFI.
 
 Mollie and Zapier moved from Greenhouse/Lever to Ashby. HUB Organoids
 (Teamtailor, custom domain) and BaseClear and Single Cell Discoveries (both
