@@ -38,6 +38,8 @@ jobs:
           docker compose run --rm --no-deps app python -m tests.test_pipeline
           docker compose run --rm --no-deps app python -m tests.test_storage_upsert
           docker compose run --rm --no-deps app python -m tests.test_scorer
+          docker compose run --rm --no-deps app python -m tests.test_new_adapters
+          docker compose run --rm --no-deps app python -m tests.test_example_configs
 
       - name: Deploy (images already local — no pull/build here)
         run: docker compose up -d --no-build --pull never
