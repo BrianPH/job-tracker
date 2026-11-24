@@ -156,10 +156,21 @@ sudo systemctl restart ollama
 ```
 
 The compose file defaults to `qwen2.5:3b`; override with `OLLAMA_MODEL` in
-`.env` if you want a different model. Set `LLM_BACKEND=anthropic` +
-`ANTHROPIC_API_KEY` for the hosted option. When running outside Docker
+`.env` if you want a different model. When running outside Docker
 (`python run_web.py` on the host), the default `http://localhost:11434`
 reaches the same instance directly.
+
+Scoring and CV/letter generation each select their backend independently, through
+two separate environment variables: `LLM_BACKEND` controls scoring, and
+`GENERATOR_BACKEND` controls generation. Both default to `ollama`, so setting one
+of them to `anthropic` does not change the other. Set either variable to
+`anthropic`, and set `ANTHROPIC_API_KEY`, to use the hosted option for that part
+of the pipeline. Generation needs long, complete replies, so it uses a separate
+model and a separate token budget from scoring's short JSON replies:
+`ANTHROPIC_MODEL_EXTRACT` (default `claude-haiku-5-5`) for scoring, and
+`ANTHROPIC_MODEL_WRITE` (default `claude-sonnet-5-5`) for generation. A reply
+that gets cut off by the token limit is treated as a failed generation, not
+returned to the caller truncated.
 
 Scoring is **persona-based**: `config/profile.yaml` defines your career paths
 (personas) — e.g. Bioinformatics, .NET Developer, Cloud/DevOps, Data Engineer.

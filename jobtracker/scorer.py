@@ -26,7 +26,11 @@ import requests
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "llama3.2:1b"          # tiny + fast; try qwen2.5:3b / llama3.2:3b for accuracy
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_MODEL = "claude-3-5-haiku-latest"
+# EXTRACT = short structured replies (scoring); WRITE = long free-text replies (generation).
+ANTHROPIC_MODEL_EXTRACT = "claude-haiku-5-5"
+ANTHROPIC_MODEL_WRITE = "claude-sonnet-5-5"
+ANTHROPIC_MAX_TOKENS_EXTRACT = 512
+ANTHROPIC_MAX_TOKENS_WRITE = 2048
 
 DESC_CHARS = 900
 
@@ -166,35 +170,56 @@ def ollama_caller(base_url: str = OLLAMA_URL, model: str = OLLAMA_MODEL,
     return _call
 
 
-def anthropic_caller(api_key: str, model: str = ANTHROPIC_MODEL) -> Caller:
+def anthropic_caller(api_key: str, model: str, max_tokens: int = 512) -> Caller:
     def _call(system: str, user: str) -> str:
         resp = requests.post(
             ANTHROPIC_URL,
             headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": model, "max_tokens": 512, "system": system,
+            json={"model": model, "max_tokens": max_tokens, "system": system,
                   "messages": [{"role": "user", "content": user}]},
             timeout=60,
         )
         resp.raise_for_status()
-        blocks = resp.json().get("content", [])
+        data = resp.json()
+        if data.get("stop_reason") == "max_tokens":
+            raise RuntimeError(
+                f"Anthropic reply truncated at max_tokens={max_tokens} (model {model}); "
+                "treating as a failed generation rather than returning a cut-off reply."
+            )
+        blocks = data.get("content", [])
         return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
     return _call
 
 
-def make_caller(json_format: bool = True, temperature: float = 0) -> Optional[Caller]:
+def make_caller(json_format: bool = True, temperature: float = 0,
+                backend_env: str = "LLM_BACKEND") -> Optional[Caller]:
     """Pick a backend from env. Default: local Ollama.
 
-    json_format=False returns a plain-text caller (used by the CV/letter generator).
+    json_format=False returns a plain-text caller (used by the CV/letter generator),
+    which also means a longer Anthropic model/max_tokens pair (ANTHROPIC_MODEL_WRITE)
+    instead of the short structured-reply pair used for scoring (ANTHROPIC_MODEL_EXTRACT).
+
+    backend_env lets callers pick a different backend independently of scoring's
+    LLM_BACKEND -- the generator uses GENERATOR_BACKEND so switching it to Anthropic
+    doesn't also move job scoring off the free local Ollama backend.
     """
-    backend = os.getenv("LLM_BACKEND", "ollama").lower()
+    backend = os.getenv(backend_env, "ollama").lower()
     if backend == "ollama":
         return ollama_caller(os.getenv("OLLAMA_HOST", OLLAMA_URL),
                              os.getenv("OLLAMA_MODEL", OLLAMA_MODEL),
                              json_format=json_format, temperature=temperature)
     if backend == "anthropic":
         key = os.getenv("ANTHROPIC_API_KEY")
-        return anthropic_caller(key, os.getenv("ANTHROPIC_MODEL", ANTHROPIC_MODEL)) if key else None
+        if not key:
+            return None
+        if json_format:
+            model = os.getenv("ANTHROPIC_MODEL_EXTRACT", ANTHROPIC_MODEL_EXTRACT)
+            max_tokens = ANTHROPIC_MAX_TOKENS_EXTRACT
+        else:
+            model = os.getenv("ANTHROPIC_MODEL_WRITE", ANTHROPIC_MODEL_WRITE)
+            max_tokens = ANTHROPIC_MAX_TOKENS_WRITE
+        return anthropic_caller(key, model, max_tokens)
     return None
 
 

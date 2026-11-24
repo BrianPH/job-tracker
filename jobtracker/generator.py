@@ -8,10 +8,11 @@ those facts:
   2. the motivation-letter body (style-guided by the examples in Solliciteren/).
 
 Language: Dutch or English, auto-detected from the vacancy text (overridable).
-Backend: same env-configured LLM as the scorer (local Ollama by default),
-requested in plain-text mode. Without a configured/reachable LLM the generator
-falls back to the static profile summary + a solid template letter, so it
-always produces documents.
+Backend: GENERATOR_BACKEND (local Ollama by default; independent of the scorer's
+LLM_BACKEND, so switching generation to Anthropic doesn't move scoring off the
+free local backend), requested in plain-text mode. Without a configured/reachable
+LLM the generator falls back to the static profile summary + a solid template
+letter, so it always produces documents.
 
 Output: applications/<Company>_<Title>/CV_Brian_Haubrich.docx + letter .docx.
 """
@@ -139,7 +140,7 @@ def generate_letter_body(job: dict, candidate: dict, profile: dict, lang: str,
             f"CANDIDATE FACTS:\n{_facts_block(candidate, profile, lang)}\n\n"
             f"VACANCY:\nTitle: {job.get('title','')}\nCompany: {job.get('company','')}\n"
             f"Location: {job.get('location','')}\n"
-            f"Description: {(job.get('description') or '')[:2000]}\n\n"
+            f"Description: {job.get('description') or ''}\n\n"
             f"STYLE EXAMPLE (previous letters by the same candidate):\n"
             f"{example_letter_text(lang)}\n\n"
             f"Write the letter body now, in {_lang_name(lang)}."
@@ -161,7 +162,7 @@ def generate_cv_summary(job: dict, candidate: dict, profile: dict, lang: str,
         user = (
             f"CANDIDATE FACTS:\n{_facts_block(candidate, profile, lang)}\n\n"
             f"VACANCY:\nTitle: {job.get('title','')}\nCompany: {job.get('company','')}\n"
-            f"Description: {(job.get('description') or '')[:1200]}\n\n"
+            f"Description: {job.get('description') or ''}\n\n"
             f"Write the tailored CV profile paragraph now, in {_lang_name(lang)}."
         )
         try:
@@ -334,7 +335,7 @@ def generate_application(job: dict, out_dir: Path = OUTPUT_DIR,
 
     if use_llm and caller is None:
         from .scorer import make_caller
-        caller = make_caller(json_format=False, temperature=0.4)
+        caller = make_caller(json_format=False, temperature=0.4, backend_env="GENERATOR_BACKEND")
     if not use_llm:
         caller = None
 
