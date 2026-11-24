@@ -98,7 +98,9 @@ Keep `config/candidate.yaml` up to date when your CV changes.
 | adzuna | NL software + bioinformatics searches | official API, free key (aggregator) |
 | jooble | NL software + bioinformatics searches | official API, free key (aggregator) |
 | academictransfer | none currently (LUMC disabled, see below) | public search API (best-effort) |
-| html | The Hyve, NKI, Hartwig Medical Foundation, UMCG/ERIBA, TU Delft, KNAW, Leiden University, Erasmus MC, Naturalis Biodiversity Center | generic anchor scraper |
+| html | The Hyve, NKI, Hartwig Medical Foundation, UMCG/ERIBA; TU Delft, Erasmus MC, Naturalis Biodiversity Center available in `config/companies.example.yaml`*; KNAW, Leiden University also in that file but disabled pending link-pattern verification | generic anchor scraper |
+
+\* Entries in `config/companies.example.yaml` are reference-only -- copy the ones you want into your real `config/companies.yaml` before they're part of any actual run.
 
 Adding a company on an existing platform = one entry in `config/companies.yaml`.
 Verify a Greenhouse board via `https://boards-api.greenhouse.io/v1/boards/<board>/jobs`,
