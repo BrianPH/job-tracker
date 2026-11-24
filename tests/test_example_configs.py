@@ -34,6 +34,13 @@ def test_companies_example_parses_with_expected_shape():
     names = {c["name"] for c in companies}
     assert {"TU Delft", "KNAW", "Leiden University", "Erasmus MC",
             "Naturalis Biodiversity Center"} <= names
+    by_name = {c["name"]: c for c in companies}
+    # KNAW and Leiden's link_pattern is inferred from TU Delft's platform, not
+    # directly observed (both had zero job-shaped anchors to check against) --
+    # must stay disabled until check_source.py confirms it against a real link.
+    assert by_name["KNAW"]["enabled"] is False
+    assert by_name["Leiden University"]["enabled"] is False
+    assert by_name["TU Delft"]["enabled"] is True
     for c in companies:
         assert c["adapter"] == "html"
         params = c["params"]

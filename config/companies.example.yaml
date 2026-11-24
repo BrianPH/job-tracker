@@ -12,7 +12,7 @@
 
 companies:
   # SAP SuccessFactors Career Site Builder (`/go/<list>/<id>` URLs). Verified
-  # via tools/check_source.py on 2026-11-24 -- see issue #2 for the full
+  # via check_source.py on 2026-11-24 -- see issue #2 for the full
   # per-site findings. The underlying platform also exposes an RSS feed at
   # /services/rss/category/?catid=<id>, confirmed working on all three sites
   # below, but capped at ~10 items -- not used here, the html adapter with the
@@ -30,15 +30,15 @@ companies:
                        laborant, "physician assistant", anesthesiemedewerker]
       max_results: 40
 
-  # Same platform as TU Delft. HTML-adapter mechanism confirmed (200 OK,
-  # correctly parsed), but KNAW had zero open positions on 2026-11-24, so the
-  # job-detail link pattern itself could not be directly observed here --
-  # inferred from TU Delft's identical platform (same RSS endpoint shape,
-  # same /go/ URL convention). Re-run check_source.py once KNAW has postings
-  # to confirm "job/" actually matches real links before relying on this.
+  # Same platform as TU Delft. HTML-adapter mechanism confirmed (200 OK), but
+  # KNAW had zero open positions on 2026-11-24, and the generic listing page
+  # has zero job-shaped anchors at all right now -- the "job/" pattern is
+  # inferred from TU Delft's identical platform, not directly observed.
+  # Disabled until check_source.py confirms real links match. Enable once it
+  # does (and once the listing has postings to check against).
   - name: KNAW
     adapter: html
-    enabled: true
+    enabled: false
     params:
       careers_url: "https://vacatures.knaw.nl/go/All-jobs/9635855/"
       link_pattern: "job/"
@@ -49,14 +49,16 @@ companies:
                        laborant, "physician assistant", anesthesiemedewerker]
       max_results: 40
 
-  # Same caveat as KNAW: platform confirmed (RSS + /go/ URL both resolve),
-  # but zero current postings on 2026-11-24, so "job/" is inferred from
-  # TU Delft rather than directly observed. Use the English list id, not the
-  # Dutch one -- the Dutch "Alle-vacatures/5491001" id currently redirects to
-  # a session-bound error page on a bare GET (see issue #2).
+  # Same caveat as KNAW, and worse: the English list id below returns zero
+  # job-shaped anchors on 2026-11-24, even though Leiden has open English
+  # roles elsewhere -- this id looks wrong, not merely empty right now.
+  # Disabled until the correct list id is found and check_source.py confirms
+  # real links match. (The Dutch "Alle-vacatures/5491001" id is a dead end
+  # too -- it redirects to a session-bound error page on a bare GET, see
+  # issue #2.)
   - name: Leiden University
     adapter: html
-    enabled: true
+    enabled: false
     params:
       careers_url: "https://careers.universiteitleiden.nl/go/Engelstalige-vacatures/9653701/"
       link_pattern: "job/"
@@ -67,7 +69,7 @@ companies:
                        laborant, "physician assistant", anesthesiemedewerker]
       max_results: 40
 
-  # Verified 2026-11-24: 5 real vacancy links on the first page, matched by
+  # Verified 2026-11-24: real vacancy links on the first page, matched by
   # /en/vacancy/<numeric>/. Replaces the old academictransfer entry.
   - name: Erasmus MC
     adapter: html
@@ -99,7 +101,7 @@ companies:
       max_results: 40
 
 # Not resolved yet -- do not copy these in as-is. Each needs another pass with
-# tools/check_source.py before it can be added (see issue #2 and the C1 PR
+# check_source.py before it can be added (see issue #2 and the C1 PR
 # description for what was tried and why it didn't work on 2026-11-24):
 #   - Erasmus University Rotterdam: the plan's URL (eur.nl/en/working/vacancies)
 #     404s; the real vacancies URL wasn't found in this pass.
