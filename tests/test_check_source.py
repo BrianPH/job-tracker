@@ -16,10 +16,6 @@ class _FakeResponse:
         pass
 
 
-class _FakeRequestException(Exception):
-    pass
-
-
 FIXTURE_HTML = """
 <html><body>
   <a href="/vacancies/data-engineer">Data Engineer</a>
