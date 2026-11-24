@@ -583,16 +583,13 @@ def extract_html_links(page_html: str, base_url: str, link_pattern: str = "") ->
 
 
 def _title_matches_any(title: str, keywords: List[str]) -> bool:
-    """True if `title` contains any keyword as a whole word/phrase.
-
-    Plain substring matching would let a short keyword match inside an
-    unrelated longer word (the same risk as filters._contains_keyword);
-    guard against alphanumeric neighbours only, so punctuation-containing
-    keywords still match normally.
+    """True if `title` contains any keyword, not glued onto a preceding
+    letter/digit (same matching rule as filters._contains_keyword -- see its
+    docstring for why only the left side is guarded).
     """
     t = title.lower()
     for k in keywords:
-        pattern = r"(?<![a-z0-9])" + re.escape(k.lower()) + r"(?![a-z0-9])"
+        pattern = r"(?<![a-z0-9])" + re.escape(k.lower())
         if re.search(pattern, t):
             return True
     return False

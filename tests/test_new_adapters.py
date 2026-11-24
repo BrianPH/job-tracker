@@ -13,6 +13,7 @@ from jobtracker.adapters import (
     parse_lever_posting,
     parse_remoteok_job,
     parse_remotive_job,
+    _title_matches_any,
 )
 from jobtracker.filters import parse_salary_max, passes
 from jobtracker.models import Job
@@ -376,6 +377,39 @@ def test_exclude_keyword_does_not_match_inside_a_longer_word():
     print("PASS test_exclude_keyword_does_not_match_inside_a_longer_word")
 
 
+def test_exclude_keyword_matches_dutch_plural_inflection():
+    # The exclude keyword is the Dutch singular; the actual job title is
+    # almost always the plural ("-n"/"-en" suffix). A left-anchored keyword
+    # must still match the inflected form, not just the bare singular.
+    rules = {"exclude_any": ["verpleegkundige", "laborant"]}
+    assert not passes(Job(title="Verpleegkundigen IC", company="A", source="t"), rules)
+    assert not passes(Job(title="Laboranten Pathologie", company="A", source="t"), rules)
+    print("PASS test_exclude_keyword_matches_dutch_plural_inflection")
+
+
+def test_exclude_tail_compound_needs_its_own_keyword():
+    # "arts" alone can't exclude a tail compound like "huisarts" without also
+    # breaking it as a standalone word / left-anchored prefix elsewhere --
+    # that's why profile.example.yaml lists "huisarts"/"tandarts" separately.
+    generic_only = {"exclude_any": ["arts"]}
+    with_compound = {"exclude_any": ["arts", "huisarts"]}
+    huisarts = Job(title="Huisarts", company="A", source="t")
+    assert passes(huisarts, generic_only)       # the residual gap
+    assert not passes(huisarts, with_compound)  # closed by the explicit keyword
+    print("PASS test_exclude_tail_compound_needs_its_own_keyword")
+
+
+def test_title_include_matches_truncated_prefix():
+    # "bioinformatic" is a deliberately truncated include keyword meant to
+    # match several inflections/spellings at once.
+    keywords = ["bioinformatic", "engineer"]
+    for title in ["Bioinformatician", "Bioinformatics Specialist",
+                  "Bioinformatica Analist", "Senior Engineering Manager"]:
+        assert _title_matches_any(title, keywords), title
+    assert not _title_matches_any("Verpleegkundige IC", keywords)
+    print("PASS test_title_include_matches_truncated_prefix")
+
+
 if __name__ == "__main__":
     test_parse_greenhouse()
     test_parse_lever()
@@ -394,4 +428,7 @@ if __name__ == "__main__":
     test_parse_jooble()
     test_salary_setpoint()
     test_exclude_keyword_does_not_match_inside_a_longer_word()
+    test_exclude_keyword_matches_dutch_plural_inflection()
+    test_exclude_tail_compound_needs_its_own_keyword()
+    test_title_include_matches_truncated_prefix()
     print("\nAll new-adapter tests passed.")

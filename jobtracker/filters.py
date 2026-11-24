@@ -41,15 +41,21 @@ def _text(job: Job) -> str:
 
 
 def _contains_keyword(text: str, keyword: str) -> bool:
-    """True if `keyword` occurs in `text` as a whole word/phrase.
+    """True if `keyword` occurs in `text`, not glued onto a preceding letter/digit.
 
-    Plain substring matching would let short keywords match inside unrelated
-    longer words -- e.g. the clinical-role exclude "arts" (Dutch for
-    "physician") would also match "starts", "parts", "charts". Guard only
-    against alphanumeric neighbours (not punctuation), so keywords containing
-    their own punctuation (e.g. "ph.d.") still match normally.
+    Plain substring matching let short keywords match inside unrelated longer
+    words -- e.g. the clinical-role exclude "arts" (Dutch for "physician")
+    also matched "starts", "parts", "charts". Guarding the LEFT side only
+    (not the right) fixes that -- all three false positives have "arts"
+    glued onto a preceding letter -- while still matching a keyword used as
+    a prefix, which is the normal case here: Dutch plurals/inflections
+    ("verpleegkundige" -> "verpleegkundigen"), and deliberately truncated
+    include keywords ("bioinformatic" -> "bioinformatics"/"bioinformatician").
+    A keyword glued onto a FOLLOWING letter instead (a tail compound like
+    "huisarts") is a real residual gap -- add the compound itself as its own
+    keyword rather than trying to fix that generically here.
     """
-    pattern = r"(?<![a-z0-9])" + re.escape(keyword) + r"(?![a-z0-9])"
+    pattern = r"(?<![a-z0-9])" + re.escape(keyword)
     return re.search(pattern, text) is not None
 
 
