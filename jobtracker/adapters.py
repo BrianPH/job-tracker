@@ -1,7 +1,8 @@
 """Source adapters. Each returns a list[Job] for one company.
 
 Implemented: recruitee, workday, teamtailor, greenhouse, lever, ashby,
-smartrecruiters, remotive, remoteok, adzuna, jooble, academictransfer, html.
+smartrecruiters, remotive, remoteok, adzuna, jooble, academictransfer, html,
+werkenvoornederland.
 The runner dispatches on the `adapter` field in companies.yaml.
 """
 from __future__ import annotations
@@ -639,6 +640,103 @@ def fetch_html(company: str, params: dict) -> List[Job]:
     return jobs
 
 
+# --------------------------------------------------------------------------- #
+# Werken voor Nederland  (central government jobs site: RIVM, NFI, ...)       #
+# Hippo/BloomReach CMS. The listing at /vacatures is a client-rendered shell  #
+# -- no RSS/JSON API exists -- but the shell embeds a hidden                  #
+# <div id="/vacatures?_hn:type=component-rendering&_hn:ref=<ref>" class=     #
+# "...Async"> for the results component. Re-fetching that exact URL (with    #
+# &_hn:rid=vacancy-results appended) returns the same component SERVER-      #
+# rendered, as real HTML -- including a `werkgever=<code>` query param that  #
+# the site's own employer-filter checkboxes already use                      #
+# (onclick="filterClick('werkgever', '<code>')"), confirmed server-side      #
+# (RIVM code 01760 returns only RIVM postings, not the ~1270-result          #
+# firehose). Find a new employer's code the same way: load /vacatures,       #
+# search the page for the employer's name, read the numeric id/value on its  #
+# checkbox <input>. Pagination: rid=vacancy-results for page 1 (also carries #
+# the total-results count), rid=append-next-page-results&pagina=<n> for      #
+# later pages; a page with no `<section class="vacancy">` (just             #
+# `<span id="lastPage">`) means there are no more.                           #
+# --------------------------------------------------------------------------- #
+WVN_BASE = "https://www.werkenvoornederland.nl"
+# Component ref for the vacancy-results fragment on /vacatures, discovered by
+# inspecting the hidden Async div described above. This is an address within
+# the page's component tree, not a session token -- stable across requests,
+# but tied to the site's current page template. If this adapter starts
+# returning nothing, re-discover it the same way.
+WVN_RESULTS_REF = "r46_r1_r4"
+
+
+def parse_werkenvoornederland_card(section, company: str) -> Job:
+    """Parse one <section class="vacancy"> listing card into a Job."""
+    a = section.find("a", attrs={"data-govan-action": "view-card"})
+    title = a.get_text(strip=True) if a else ""
+    url = _absolute_url(WVN_BASE, a["href"]) if a and a.get("href") else ""
+
+    location = ""
+    salary = ""
+    for item in section.find_all("li", class_="job-short-info__item"):
+        icon = item.find("span", attrs={"role": "img"})
+        label = (icon.get("title") or "") if icon else ""
+        value = item.find("span", class_="job-short-info__value")
+        value_text = " ".join(value.get_text(" ", strip=True).split()) if value else ""
+        if label == "Locatie":
+            location = value_text
+        elif label == "Salaris":
+            salary = value_text
+
+    return Job(
+        title=title, company=company, source="WerkenVoorNederland", url=url,
+        location=location, salary=salary,
+        job_id=f"wvn:{Job.make_id(company, url)}",
+    )
+
+
+def fetch_werkenvoornederland(company: str, params: dict) -> List[Job]:
+    werkgever = params.get("werkgever", "")
+    if not werkgever:
+        return []
+    want_detail = params.get("descriptions", True)
+    max_jobs = int(params.get("max_results", 30))
+
+    from bs4 import BeautifulSoup
+
+    jobs: List[Job] = []
+    page = 1
+    while len(jobs) < max_jobs:
+        if page == 1:
+            url = (f"{WVN_BASE}/vacatures?_hn:type=resource&_hn:ref={WVN_RESULTS_REF}"
+                   f"&_hn:rid=vacancy-results&werkgever={werkgever}")
+        else:
+            url = (f"{WVN_BASE}/vacatures?_hn:type=resource&_hn:ref={WVN_RESULTS_REF}"
+                   f"&_hn:rid=append-next-page-results&pagina={page}&werkgever={werkgever}")
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=TIMEOUT)
+        resp.raise_for_status()
+        sections = BeautifulSoup(resp.text, "html.parser").find_all("section", class_="vacancy")
+        if not sections:
+            break
+        for section in sections:
+            if len(jobs) >= max_jobs:
+                break
+            jobs.append(parse_werkenvoornederland_card(section, company))
+        if len(sections) < 20:  # fewer than a full page -> this was the last one
+            break
+        page += 1
+
+    if want_detail:
+        for job in jobs:
+            if not job.url:
+                continue
+            try:
+                d = requests.get(job.url, headers=BROWSER_HEADERS, timeout=TIMEOUT)
+                d.raise_for_status()
+                body = BeautifulSoup(d.text, "html.parser").find("div", class_="s-article-content")
+                if body:
+                    job.description = " ".join(body.get_text(" ", strip=True).split())[:4000]
+            except requests.RequestException:
+                pass
+    return jobs
+
 
 # --------------------------------------------------------------------------- #
 # Adzuna  (aggregator: indexes many boards incl. much of what LinkedIn shows)  #
@@ -756,6 +854,7 @@ ADAPTERS: Dict[str, Callable[[str, dict], List[Job]]] = {
     "jooble": fetch_jooble,
     "academictransfer": fetch_academictransfer,
     "html": fetch_html,
+    "werkenvoornederland": fetch_werkenvoornederland,
 }
 
 
