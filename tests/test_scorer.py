@@ -173,7 +173,7 @@ def test_anthropic_extract_vs_write_model_and_tokens():
 def test_anthropic_caller_raises_on_truncated_reply():
     # A reply cut off by the token limit must be treated as a failure, never
     # returned to the caller as if it were a complete letter/summary.
-    caller = scorer_mod.anthropic_caller("test-key", "claude-sonnet-5-5", max_tokens=2048)
+    caller = scorer_mod.anthropic_caller("test-key", ANTHROPIC_MODEL_WRITE, max_tokens=2048)
     raised = False
     with _fake_anthropic_post({"stop_reason": "max_tokens",
                                "content": [{"type": "text", "text": "cut off mid"}]}, []):

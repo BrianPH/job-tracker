@@ -27,8 +27,8 @@ OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "llama3.2:1b"          # tiny + fast; try qwen2.5:3b / llama3.2:3b for accuracy
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 # EXTRACT = short structured replies (scoring); WRITE = long free-text replies (generation).
-ANTHROPIC_MODEL_EXTRACT = "claude-haiku-5-5"
-ANTHROPIC_MODEL_WRITE = "claude-sonnet-5-5"
+ANTHROPIC_MODEL_EXTRACT = "claude-haiku-4-5-20251001"
+ANTHROPIC_MODEL_WRITE = "claude-sonnet-5"
 ANTHROPIC_MAX_TOKENS_EXTRACT = 512
 ANTHROPIC_MAX_TOKENS_WRITE = 2048
 

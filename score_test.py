@@ -109,7 +109,7 @@ def main() -> int:
     if not args.fake:
         backend = os.getenv("LLM_BACKEND", "ollama")
         model = os.getenv("OLLAMA_MODEL", "llama3.2:1b") if backend == "ollama" \
-            else os.getenv("ANTHROPIC_MODEL_EXTRACT", "claude-haiku-5-5")
+            else os.getenv("ANTHROPIC_MODEL_EXTRACT", "claude-haiku-4-5-20251001")
         print(f"Backend: {backend} ({model})\n")
 
     cases = [(j, lo, hi) for j, lo, hi in CASES

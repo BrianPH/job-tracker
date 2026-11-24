@@ -167,8 +167,8 @@ of them to `anthropic` does not change the other. Set either variable to
 `anthropic`, and set `ANTHROPIC_API_KEY`, to use the hosted option for that part
 of the pipeline. Generation needs long, complete replies, so it uses a separate
 model and a separate token budget from scoring's short JSON replies:
-`ANTHROPIC_MODEL_EXTRACT` (default `claude-haiku-5-5`) for scoring, and
-`ANTHROPIC_MODEL_WRITE` (default `claude-sonnet-5-5`) for generation. A reply
+`ANTHROPIC_MODEL_EXTRACT` (default `claude-haiku-4-5-20251001`) for scoring, and
+`ANTHROPIC_MODEL_WRITE` (default `claude-sonnet-5`) for generation. A reply
 that gets cut off by the token limit is treated as a failed generation, not
 returned to the caller truncated.
 
