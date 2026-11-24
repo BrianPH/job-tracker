@@ -10,6 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import yaml
 
+from jobtracker.adapters import ADAPTERS
+
 ROOT = Path(__file__).resolve().parents[1]
 COMPANIES_EXAMPLE = ROOT / "config" / "companies.example.yaml"
 PROFILE_EXAMPLE = ROOT / "config" / "profile.example.yaml"
@@ -42,6 +44,10 @@ def test_companies_example_parses_with_expected_shape():
     assert by_name["Leiden University"]["enabled"] is False
     assert by_name["TU Delft"]["enabled"] is True
 
+    # a typo'd/unknown adapter name must not pass silently
+    for c in companies:
+        assert c["adapter"] in ADAPTERS, c["name"]
+
     html_entries = [c for c in companies if c["adapter"] == "html"]
     assert len(html_entries) >= 5
     for c in html_entries:
@@ -56,7 +62,11 @@ def test_companies_example_parses_with_expected_shape():
     wvn_entries = [c for c in companies if c["adapter"] == "werkenvoornederland"]
     assert {"RIVM", "NFI"} <= {c["name"] for c in wvn_entries}
     for c in wvn_entries:
-        assert c["params"]["werkgever"], c["name"]
+        werkgever = c["params"]["werkgever"]
+        assert werkgever, c["name"]
+        # YAML parses an unquoted leading-zero digit string as octal (e.g.
+        # 01760 -> 1008) -- it must stay a quoted string in the YAML source.
+        assert isinstance(werkgever, str), c["name"]
     print("PASS test_companies_example_parses_with_expected_shape")
 
 

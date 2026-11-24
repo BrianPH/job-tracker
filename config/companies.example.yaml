@@ -109,8 +109,13 @@ companies:
   # exists; the adapter reaches the site's own Hippo CMS results component
   # directly -- see the comment above fetch_werkenvoornederland in
   # jobtracker/adapters.py for how, and how to find another organisation's
-  # `werkgever` code. Verified 2026-11-24: 14 real RIVM postings, 5 real NFI
+  # `werkgever` code (a leading-zero number -- keep it quoted, or YAML parses
+  # it as octal). Verified 2026-11-24: 14 real RIVM postings, 5 real NFI
   # postings, both server-side filtered (not a client-side/JS-only filter).
+  # NOTE: unlike the html entries above, this adapter does not support
+  # title_include/title_exclude -- RIVM/NFI post few enough vacancies that
+  # the per-source volume problem those exist for doesn't apply here, and
+  # the global rule_filter excludes below still apply after fetch.
   - name: RIVM
     adapter: werkenvoornederland
     enabled: true
