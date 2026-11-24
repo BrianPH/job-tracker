@@ -1,0 +1,58 @@
+# Fallback profile, loaded automatically by pipeline.load_profile() and
+# generator.load_profile() when config/profile.yaml (git-ignored, personal)
+# doesn't exist. Copy this to config/profile.yaml and edit it with your own
+# details -- everything below is a placeholder, not real candidate data.
+
+profile:
+  summary: >
+    Placeholder candidate summary. Replace with your own background, e.g.
+    "Computer Science graduate with experience in Python, C#/.NET, SQL,
+    Docker and CI/CD pipelines."
+
+personas:
+  - name: Generalist
+    summary: >
+      Placeholder persona. Define one or more career paths you're open to,
+      e.g. "Bioinformatics", "Cloud / DevOps Engineer", ".NET Developer".
+
+persona_constraints: >
+  Placeholder constraints applied to every persona, e.g. seniority
+  ("Early-career (0-3 years); senior roles are a weak fit.").
+
+rules:
+  keywords_any: []
+  # Clinical titles and PhD/doctoral positions, decided 2026-11-24 as part of
+  # the source-expansion plan: universities, UMCs and KNAW post many of
+  # these, and neither matches a software/IT career path.
+  exclude_any:
+    - phd
+    - "ph.d."
+    - promovendus
+    - promotieplek
+    - promotieonderzoek
+    - "doctoral candidate"
+    - verpleegkundige
+    - arts
+    - aios
+    - anios
+    - laborant
+    - "physician assistant"
+    - anesthesiemedewerker
+  # Randstad-area locations added 2026-11-24 for the university/UMC/institute
+  # source expansion.
+  locations_any:
+    - Leiden
+    - Den Haag
+    - Delft
+    - Rotterdam
+    - Utrecht
+    - Amsterdam
+    - Bilthoven
+    - Nieuwegein
+    - Haarlem
+    - Amersfoort
+  min_salary: 0
+  always_keep_remote: true
+
+app:
+  scrape_hour: 8
