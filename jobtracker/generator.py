@@ -31,6 +31,13 @@ PROFILE_PATH = ROOT / "config" / "profile.yaml"
 EXAMPLES_DIR = ROOT / "Solliciteren"
 OUTPUT_DIR = ROOT / "applications"
 
+# Only the generic `html` adapter caps description length (at 4000 chars,
+# jobtracker/adapters.py); JSON-API adapters (ashby, smartrecruiters,
+# teamtailor, workday, greenhouse, lever) pass descriptions through
+# uncapped. Cap here too, at the same size, so a long posting can't blow a
+# local model's context window or run up Anthropic spend unbounded.
+DESC_CHARS = 4000
+
 DUTCH_MARKERS = (" en ", " het ", " een ", " wij ", " jij ", " je ", "ervaring",
                  "werkzaamheden", "functie", "vaardigheden", "kennis van", "binnen")
 
@@ -140,7 +147,7 @@ def generate_letter_body(job: dict, candidate: dict, profile: dict, lang: str,
             f"CANDIDATE FACTS:\n{_facts_block(candidate, profile, lang)}\n\n"
             f"VACANCY:\nTitle: {job.get('title','')}\nCompany: {job.get('company','')}\n"
             f"Location: {job.get('location','')}\n"
-            f"Description: {job.get('description') or ''}\n\n"
+            f"Description: {(job.get('description') or '')[:DESC_CHARS]}\n\n"
             f"STYLE EXAMPLE (previous letters by the same candidate):\n"
             f"{example_letter_text(lang)}\n\n"
             f"Write the letter body now, in {_lang_name(lang)}."
@@ -149,8 +156,9 @@ def generate_letter_body(job: dict, candidate: dict, profile: dict, lang: str,
             text = (caller(system, user) or "").strip()
             if len(text) > 200:
                 return text
-        except Exception:  # noqa: BLE001 - fall back to template below
-            pass
+            print(f"  [generator] letter reply too short ({len(text)} chars), falling back to template")
+        except Exception as e:  # noqa: BLE001 - fall back to template below
+            print(f"  [generator] letter generation failed, falling back to template: {e}")
     return _template_letter_body(job, candidate, lang)
 
 
@@ -162,15 +170,16 @@ def generate_cv_summary(job: dict, candidate: dict, profile: dict, lang: str,
         user = (
             f"CANDIDATE FACTS:\n{_facts_block(candidate, profile, lang)}\n\n"
             f"VACANCY:\nTitle: {job.get('title','')}\nCompany: {job.get('company','')}\n"
-            f"Description: {job.get('description') or ''}\n\n"
+            f"Description: {(job.get('description') or '')[:DESC_CHARS]}\n\n"
             f"Write the tailored CV profile paragraph now, in {_lang_name(lang)}."
         )
         try:
             text = (caller(system, user) or "").strip()
             if 100 < len(text) < 900:
                 return text
-        except Exception:  # noqa: BLE001
-            pass
+            print(f"  [generator] CV summary reply out of range ({len(text)} chars), falling back to static summary")
+        except Exception as e:  # noqa: BLE001
+            print(f"  [generator] CV summary generation failed, falling back to static summary: {e}")
     return base
 
 
