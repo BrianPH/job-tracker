@@ -13,7 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bs4 import BeautifulSoup
 
 import jobtracker.adapters as adapters_mod
-from jobtracker.adapters import fetch_werkenvoornederland, parse_werkenvoornederland_card
+from jobtracker.adapters import (
+    fetch_werkenvoornederland,
+    parse_werkenvoornederland_card,
+    _wvn_detail_description,
+)
 
 
 def _card_html(href: str, title: str, employer: str, location: str, salary: str) -> str:
@@ -55,11 +59,29 @@ def _results_page(n_cards: int, start: int = 0) -> str:
     """
 
 
-DETAIL_HTML = """
+# Sized like a real posting: duties alone (2.6-4.2k chars on real pages) can
+# already exceed a naive overall cap, pushing requirements out entirely if
+# everything were just joined in DOM order and cut once at the end. The
+# un-anchored "benefits" block mirrors the ~800-char boilerplate every real
+# posting repeats identically -- it must NOT survive into the description.
+_DUTIES_FILLER = ("Duties filler text describing the role in detail. " * 60)[:3000]
+_BENEFITS_BOILERPLATE = ("Boilerplate IKB benefits text identical on every posting. " * 15)[:800]
+_REQUIREMENTS_FILLER = ("Requirements filler text describing what we ask. " * 40)[:1800]
+
+DETAIL_HTML = f"""
 <html><body>
-<div class="s-article-content"><p>Dit ga je doen: duties text.</p></div>
-<div class="s-article-content"><p>Dit vragen wij: requirements text.</p></div>
-<div class="s-article-content"><p>Over de organisatie: employer blurb.</p></div>
+<section class="contrast--background" id="dit_ga_je_doen_anchor">
+  <div class="s-article-content"><p>DUTIES_START {_DUTIES_FILLER} DUTIES_END</p></div>
+</section>
+<section class="some-other-section">
+  <div class="s-article-content"><p>BENEFITS_START {_BENEFITS_BOILERPLATE} BENEFITS_END</p></div>
+</section>
+<section class="contrast--background" id="dit_vragen_wij_anchor">
+  <div class="s-article-content"><p>REQUIREMENTS_START {_REQUIREMENTS_FILLER} REQUIREMENTS_END</p></div>
+</section>
+<section class="contrast--background" id="bijzonderheden_anchor">
+  <div class="s-article-content"><p>BIJZONDERHEDEN_START filler BIJZONDERHEDEN_END</p></div>
+</section>
 </body></html>
 """
 
@@ -166,10 +188,27 @@ def test_fetch_werkenvoornederland_respects_max_results():
     print("PASS test_fetch_werkenvoornederland_respects_max_results")
 
 
+def test_wvn_detail_description_keeps_requirements_despite_long_duties():
+    # Regression test for the actual bug: joining every content block in DOM
+    # order (duties -> benefits boilerplate -> requirements -> ...) and
+    # cutting once at the overall budget buried requirements entirely on
+    # most real postings, since duties alone (2.6-4.2k chars on real pages)
+    # already exceeds a naive cap. Pulling duties/requirements from their own
+    # stable section anchors and splitting the budget between them means
+    # requirements always survives, regardless of how long duties runs.
+    desc = _wvn_detail_description(DETAIL_HTML)
+    assert "DUTIES_START" in desc
+    # requirements' own 1600-char budget is shorter than the 1800-char filler,
+    # so it's truncated too -- the point is that it's PRESENT at all, which
+    # the old DOM-order-then-cut approach failed on for most real postings.
+    assert "REQUIREMENTS_START" in desc
+    assert "BENEFITS_START" not in desc  # un-anchored boilerplate excluded
+    assert "BIJZONDERHEDEN_START" not in desc  # not one of the two pulled sections
+    assert len(desc) <= adapters_mod.WVN_DUTIES_CHARS + adapters_mod.WVN_REQUIREMENTS_CHARS + 1
+    print("PASS test_wvn_detail_description_keeps_requirements_despite_long_duties")
+
+
 def test_fetch_werkenvoornederland_fetches_description():
-    # Detail pages carry several same-class content blocks (duties,
-    # requirements, employer blurb, ...) -- all of them must end up in the
-    # description, not just the first.
     def handler(url):
         if "_hn:type=resource" in url:
             return _results_page(1)
@@ -178,9 +217,8 @@ def test_fetch_werkenvoornederland_fetches_description():
     with _fake_get(handler):
         jobs = fetch_werkenvoornederland("RIVM", {"werkgever": "01760", "descriptions": True})
     assert len(jobs) == 1
-    assert "duties text" in jobs[0].description
-    assert "requirements text" in jobs[0].description
-    assert "employer blurb" in jobs[0].description
+    assert "DUTIES_START" in jobs[0].description
+    assert "REQUIREMENTS_START" in jobs[0].description
     print("PASS test_fetch_werkenvoornederland_fetches_description")
 
 
@@ -228,6 +266,7 @@ if __name__ == "__main__":
     test_fetch_werkenvoornederland_stops_on_short_page()
     test_fetch_werkenvoornederland_paginates_on_full_page()
     test_fetch_werkenvoornederland_respects_max_results()
+    test_wvn_detail_description_keeps_requirements_despite_long_duties()
     test_fetch_werkenvoornederland_fetches_description()
     test_fetch_werkenvoornederland_detail_failure_leaves_description_empty()
     test_fetch_werkenvoornederland_skips_card_with_no_link()

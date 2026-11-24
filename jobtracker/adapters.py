@@ -697,6 +697,34 @@ def parse_werkenvoornederland_card(section, company: str) -> Job:
     )
 
 
+# Detail pages split the posting across several same-class
+# (.s-article-content) blocks in a fixed DOM order: duties, a ~800-char
+# identical "Individueel Keuzebudget" boilerplate block every posting
+# carries, requirements, an employer blurb, then application-process notes.
+# Just joining all of them and cutting at the overall char budget buries
+# the requirements block -- duties alone runs 2.6-4.2k chars on real
+# postings, so requirements regularly starts past any reasonable cap.
+# Pull duties and requirements from their own stable section anchors
+# instead, and split the budget between them, so requirements always
+# survives.
+WVN_DUTIES_CHARS = 2400
+WVN_REQUIREMENTS_CHARS = 1600
+
+
+def _wvn_section_text(soup, anchor_id: str) -> str:
+    section = soup.find(id=anchor_id)
+    body = section.find("div", class_="s-article-content") if section else None
+    return " ".join(body.get_text(" ", strip=True).split()) if body else ""
+
+
+def _wvn_detail_description(page_html: str) -> str:
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(page_html, "html.parser")
+    duties = _wvn_section_text(soup, "dit_ga_je_doen_anchor")[:WVN_DUTIES_CHARS]
+    requirements = _wvn_section_text(soup, "dit_vragen_wij_anchor")[:WVN_REQUIREMENTS_CHARS]
+    return " ".join(part for part in (duties, requirements) if part)
+
+
 def fetch_werkenvoornederland(company: str, params: dict) -> List[Job]:
     werkgever = params.get("werkgever", "")
     if not werkgever:
@@ -736,13 +764,7 @@ def fetch_werkenvoornederland(company: str, params: dict) -> List[Job]:
             try:
                 d = requests.get(job.url, headers=BROWSER_HEADERS, timeout=TIMEOUT)
                 d.raise_for_status()
-                # the description is split across several same-class blocks
-                # (duties, requirements, benefits, employer blurb, application
-                # notes) -- join all of them, not just the first.
-                bodies = BeautifulSoup(d.text, "html.parser").find_all("div", class_="s-article-content")
-                text = " ".join(" ".join(b.get_text(" ", strip=True).split()) for b in bodies)
-                if text:
-                    job.description = text[:4000]
+                job.description = _wvn_detail_description(d.text)
             except requests.RequestException:
                 pass
     return jobs
