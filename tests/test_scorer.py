@@ -4,12 +4,15 @@ Run:  python -m tests.test_scorer
 """
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import jobtracker.scorer as scorer_mod
 from jobtracker.models import Job
-from jobtracker.scorer import (build_job_prompt, get_personas, parse_score,
+from jobtracker.scorer import (ANTHROPIC_MODEL_EXTRACT, ANTHROPIC_MODEL_WRITE,
+                               build_job_prompt, get_personas, parse_score,
                                score_jobs, make_caller)
 
 PROFILE = {
@@ -84,6 +87,104 @@ def test_backend_selection():
     print("PASS test_backend_selection")
 
 
+class _FakeHTTPResponse:
+    def __init__(self, data: dict):
+        self._data = data
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._data
+
+
+@contextmanager
+def _fake_anthropic_post(response_data: dict, captured: list):
+    """Swap out requests.post so anthropic_caller never touches the network."""
+    original = scorer_mod.requests.post
+
+    def _fake(*args, **kwargs):
+        captured.append(kwargs)
+        return _FakeHTTPResponse(response_data)
+
+    scorer_mod.requests.post = _fake
+    try:
+        yield
+    finally:
+        scorer_mod.requests.post = original
+
+
+def test_generator_backend_independent_of_scoring():
+    # GENERATOR_BACKEND must not affect scoring's LLM_BACKEND, and vice versa.
+    saved = {k: os.environ.get(k) for k in ("LLM_BACKEND", "GENERATOR_BACKEND", "ANTHROPIC_API_KEY")}
+    try:
+        os.environ.pop("LLM_BACKEND", None)
+        os.environ["GENERATOR_BACKEND"] = "anthropic"
+        os.environ["ANTHROPIC_API_KEY"] = "test-key"
+        scoring_caller = make_caller(json_format=True)
+        generator_caller = make_caller(json_format=False, backend_env="GENERATOR_BACKEND")
+        assert "ollama_caller" in scoring_caller.__qualname__
+        assert "anthropic_caller" in generator_caller.__qualname__
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("PASS test_generator_backend_independent_of_scoring")
+
+
+def test_anthropic_extract_vs_write_model_and_tokens():
+    # Scoring (json_format=True) gets the short/cheap EXTRACT pair; generation
+    # (json_format=False) gets the long WRITE pair -- this is what let the old
+    # hardcoded 512-token Anthropic letters get silently cut off.
+    saved = {k: os.environ.get(k) for k in
+             ("LLM_BACKEND", "GENERATOR_BACKEND", "ANTHROPIC_API_KEY",
+              "ANTHROPIC_MODEL_EXTRACT", "ANTHROPIC_MODEL_WRITE")}
+    try:
+        os.environ["ANTHROPIC_API_KEY"] = "test-key"
+        os.environ.pop("ANTHROPIC_MODEL_EXTRACT", None)
+        os.environ.pop("ANTHROPIC_MODEL_WRITE", None)
+
+        os.environ["LLM_BACKEND"] = "anthropic"
+        scoring_caller = make_caller(json_format=True)
+        captured = []
+        with _fake_anthropic_post({"content": [{"type": "text", "text": "ok"}]}, captured):
+            scoring_caller("sys", "user")
+        assert captured[0]["json"]["model"] == ANTHROPIC_MODEL_EXTRACT
+        assert captured[0]["json"]["max_tokens"] == 512
+
+        os.environ["GENERATOR_BACKEND"] = "anthropic"
+        gen_caller = make_caller(json_format=False, backend_env="GENERATOR_BACKEND")
+        captured2 = []
+        with _fake_anthropic_post({"content": [{"type": "text", "text": "ok"}]}, captured2):
+            gen_caller("sys", "user")
+        assert captured2[0]["json"]["model"] == ANTHROPIC_MODEL_WRITE
+        assert captured2[0]["json"]["max_tokens"] == 2048
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("PASS test_anthropic_extract_vs_write_model_and_tokens")
+
+
+def test_anthropic_caller_raises_on_truncated_reply():
+    # A reply cut off by the token limit must be treated as a failure, never
+    # returned to the caller as if it were a complete letter/summary.
+    caller = scorer_mod.anthropic_caller("test-key", ANTHROPIC_MODEL_WRITE, max_tokens=2048)
+    raised = False
+    with _fake_anthropic_post({"stop_reason": "max_tokens",
+                               "content": [{"type": "text", "text": "cut off mid"}]}, []):
+        try:
+            caller("sys", "user")
+        except RuntimeError:
+            raised = True
+    assert raised
+    print("PASS test_anthropic_caller_raises_on_truncated_reply")
+
+
 def test_score_jobs_assigns_persona():
     def fake_caller(system, user):
         if "Bioinformatics Scientist" in user:
@@ -103,5 +204,8 @@ if __name__ == "__main__":
     test_parse_array_and_wrapped()
     test_parse_bad()
     test_backend_selection()
+    test_generator_backend_independent_of_scoring()
+    test_anthropic_extract_vs_write_model_and_tokens()
+    test_anthropic_caller_raises_on_truncated_reply()
     test_score_jobs_assigns_persona()
     print("\nAll scorer tests passed.")

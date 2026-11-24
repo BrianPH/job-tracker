@@ -8,10 +8,11 @@ those facts:
   2. the motivation-letter body (style-guided by the examples in Solliciteren/).
 
 Language: Dutch or English, auto-detected from the vacancy text (overridable).
-Backend: same env-configured LLM as the scorer (local Ollama by default),
-requested in plain-text mode. Without a configured/reachable LLM the generator
-falls back to the static profile summary + a solid template letter, so it
-always produces documents.
+Backend: GENERATOR_BACKEND (local Ollama by default; independent of the scorer's
+LLM_BACKEND, so switching generation to Anthropic doesn't move scoring off the
+free local backend), requested in plain-text mode. Without a configured/reachable
+LLM the generator falls back to the static profile summary + a solid template
+letter, so it always produces documents.
 
 Output: applications/<Company>_<Title>/CV_Brian_Haubrich.docx + letter .docx.
 """
@@ -29,6 +30,13 @@ CANDIDATE_PATH = ROOT / "config" / "candidate.yaml"
 PROFILE_PATH = ROOT / "config" / "profile.yaml"
 EXAMPLES_DIR = ROOT / "Solliciteren"
 OUTPUT_DIR = ROOT / "applications"
+
+# Only the generic `html` adapter caps description length (at 4000 chars,
+# jobtracker/adapters.py); JSON-API adapters (ashby, smartrecruiters,
+# teamtailor, workday, greenhouse, lever) pass descriptions through
+# uncapped. Cap here too, at the same size, so a long posting can't blow a
+# local model's context window or run up Anthropic spend unbounded.
+GEN_DESC_CHARS = 4000
 
 DUTCH_MARKERS = (" en ", " het ", " een ", " wij ", " jij ", " je ", "ervaring",
                  "werkzaamheden", "functie", "vaardigheden", "kennis van", "binnen")
@@ -139,7 +147,7 @@ def generate_letter_body(job: dict, candidate: dict, profile: dict, lang: str,
             f"CANDIDATE FACTS:\n{_facts_block(candidate, profile, lang)}\n\n"
             f"VACANCY:\nTitle: {job.get('title','')}\nCompany: {job.get('company','')}\n"
             f"Location: {job.get('location','')}\n"
-            f"Description: {(job.get('description') or '')[:2000]}\n\n"
+            f"Description: {(job.get('description') or '')[:GEN_DESC_CHARS]}\n\n"
             f"STYLE EXAMPLE (previous letters by the same candidate):\n"
             f"{example_letter_text(lang)}\n\n"
             f"Write the letter body now, in {_lang_name(lang)}."
@@ -148,8 +156,9 @@ def generate_letter_body(job: dict, candidate: dict, profile: dict, lang: str,
             text = (caller(system, user) or "").strip()
             if len(text) > 200:
                 return text
-        except Exception:  # noqa: BLE001 - fall back to template below
-            pass
+            print(f"  [generator] letter reply too short ({len(text)} chars), falling back to template")
+        except Exception as e:  # noqa: BLE001 - fall back to template below
+            print(f"  [generator] letter generation failed, falling back to template: {e}")
     return _template_letter_body(job, candidate, lang)
 
 
@@ -161,15 +170,16 @@ def generate_cv_summary(job: dict, candidate: dict, profile: dict, lang: str,
         user = (
             f"CANDIDATE FACTS:\n{_facts_block(candidate, profile, lang)}\n\n"
             f"VACANCY:\nTitle: {job.get('title','')}\nCompany: {job.get('company','')}\n"
-            f"Description: {(job.get('description') or '')[:1200]}\n\n"
+            f"Description: {(job.get('description') or '')[:GEN_DESC_CHARS]}\n\n"
             f"Write the tailored CV profile paragraph now, in {_lang_name(lang)}."
         )
         try:
             text = (caller(system, user) or "").strip()
             if 100 < len(text) < 900:
                 return text
-        except Exception:  # noqa: BLE001
-            pass
+            print(f"  [generator] CV summary reply out of range ({len(text)} chars), falling back to static summary")
+        except Exception as e:  # noqa: BLE001
+            print(f"  [generator] CV summary generation failed, falling back to static summary: {e}")
     return base
 
 
@@ -334,7 +344,7 @@ def generate_application(job: dict, out_dir: Path = OUTPUT_DIR,
 
     if use_llm and caller is None:
         from .scorer import make_caller
-        caller = make_caller(json_format=False, temperature=0.4)
+        caller = make_caller(json_format=False, temperature=0.4, backend_env="GENERATOR_BACKEND")
     if not use_llm:
         caller = None
 

@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 from jobtracker.generator import (
+    GEN_DESC_CHARS,
     detect_language,
     generate_application,
     load_candidate,
@@ -45,6 +46,62 @@ def test_generate_without_llm():
         shutil.rmtree(out, ignore_errors=True)
 
 
+def test_description_up_to_desc_chars_reaches_the_prompt_in_full():
+    # Previously the letter/summary prompts truncated the description to
+    # 2000/1200 chars on top of whatever the adapter already cut it to --
+    # requirements near the end of a long posting were silently dropped.
+    # A description at or under GEN_DESC_CHARS must now survive completely.
+    out = Path(tempfile.mkdtemp(prefix="jt_gen_"))
+    description = ("Relevant requirement near the end. " * 100)[:GEN_DESC_CHARS - 1]
+    seen_descriptions = []
+
+    def fake_caller(system, user):
+        seen_descriptions.append(user)
+        return "A perfectly good generated paragraph of sufficient length. " * 5
+
+    try:
+        job = {"title": "Platform Engineer", "company": "TestLab",
+               "description": description}
+        generate_application(job, out_dir=out, caller=fake_caller)
+        assert len(description) > 2000
+        assert len(seen_descriptions) == 2  # one call for the letter, one for the CV summary
+        for prompt in seen_descriptions:
+            # the full description must appear verbatim -- not just the first
+            # ~1200/2000 chars of it, as the old per-prompt truncation did.
+            assert description in prompt
+        print("PASS test_description_up_to_desc_chars_reaches_the_prompt_in_full")
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_description_beyond_desc_chars_is_capped():
+    # Not every adapter caps description length the way the generic `html`
+    # adapter does (jobtracker/adapters.py caps at 4000 chars) -- JSON-API
+    # adapters pass descriptions through uncapped. The generator must apply
+    # its own bound so an unusually long posting can't blow a local model's
+    # context window or run up Anthropic spend unbounded.
+    out = Path(tempfile.mkdtemp(prefix="jt_gen_"))
+    description = "x" * (GEN_DESC_CHARS * 2)
+    seen_descriptions = []
+
+    def fake_caller(system, user):
+        seen_descriptions.append(user)
+        return "A perfectly good generated paragraph of sufficient length. " * 5
+
+    try:
+        job = {"title": "Platform Engineer", "company": "TestLab",
+               "description": description}
+        generate_application(job, out_dir=out, caller=fake_caller)
+        assert len(seen_descriptions) == 2
+        for prompt in seen_descriptions:
+            assert description not in prompt
+            assert ("x" * GEN_DESC_CHARS) in prompt
+            assert ("x" * (GEN_DESC_CHARS + 1)) not in prompt
+        print("PASS test_description_beyond_desc_chars_is_capped")
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
 def test_generate_with_fake_llm():
     out = Path(tempfile.mkdtemp(prefix="jt_gen_"))
     try:
@@ -73,5 +130,7 @@ if __name__ == "__main__":
     test_detect_language()
     test_candidate_config_loads()
     test_generate_without_llm()
+    test_description_up_to_desc_chars_reaches_the_prompt_in_full()
+    test_description_beyond_desc_chars_is_capped()
     test_generate_with_fake_llm()
     print("\nAll generator tests passed.")
