@@ -1,7 +1,11 @@
 """Offline tests for the greenhouse, lever, remotive, remoteok, academictransfer
-and html adapters (parsers only — no network)."""
+and html adapters (parsers only, except the fetch_html title-filter tests, which
+monkeypatch requests.get with an in-memory fake -- no real network)."""
+from unittest.mock import MagicMock, patch
+
 from jobtracker.adapters import (
     extract_html_links,
+    fetch_html,
     parse_adzuna_job,
     parse_jooble_job,
     parse_academictransfer_result,
@@ -9,6 +13,7 @@ from jobtracker.adapters import (
     parse_lever_posting,
     parse_remoteok_job,
     parse_remotive_job,
+    _title_matches_any,
 )
 from jobtracker.filters import parse_salary_max, passes
 from jobtracker.models import Job
@@ -161,6 +166,146 @@ def test_extract_html_links_generic_cta_dutch():
     print("PASS test_extract_html_links_generic_cta_dutch")
 
 
+_LISTING_HTML = """
+<html><body>
+  <a href="/vacatures/software-engineer">Software Engineer</a>
+  <a href="/vacatures/data-scientist">Data Scientist</a>
+  <a href="/vacatures/verpleegkundige-cardiologie">Verpleegkundige Cardiologie</a>
+  <a href="/vacatures/phd-candidate-genomics">PhD Candidate Genomics</a>
+</body></html>
+"""
+
+
+def _fake_html_get(detail_calls):
+    def _fake(url, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status = lambda: None
+        if url.endswith("/vacatures"):
+            resp.text = _LISTING_HTML
+        else:
+            detail_calls.append(url)
+            resp.text = "<html><body><p>Full job description text.</p></body></html>"
+        return resp
+    return _fake
+
+
+def test_fetch_html_title_include_skips_detail_fetch_for_non_matching():
+    detail_calls = []
+    with patch("jobtracker.adapters.requests.get", _fake_html_get(detail_calls)):
+        jobs = fetch_html("TestOrg", {
+            "careers_url": "https://example.nl/vacatures",
+            "link_pattern": "/vacatures/[a-z-]+$",
+            "title_include": ["software", "data", "engineer", "scientist"],
+        })
+    titles = [j.title for j in jobs]
+    assert "Software Engineer" in titles and "Data Scientist" in titles
+    assert "Verpleegkundige Cardiologie" not in titles and "PhD Candidate Genomics" not in titles
+    # the two non-matching links must never have triggered a detail request
+    assert len(detail_calls) == 2
+    print("PASS test_fetch_html_title_include_skips_detail_fetch_for_non_matching")
+
+
+def test_fetch_html_title_exclude_drops_matching_titles():
+    detail_calls = []
+    with patch("jobtracker.adapters.requests.get", _fake_html_get(detail_calls)):
+        jobs = fetch_html("TestOrg", {
+            "careers_url": "https://example.nl/vacatures",
+            "link_pattern": "/vacatures/[a-z-]+$",
+            "title_exclude": ["verpleegkundige", "phd"],
+        })
+    titles = [j.title for j in jobs]
+    assert "Software Engineer" in titles and "Data Scientist" in titles
+    assert "Verpleegkundige Cardiologie" not in titles and "PhD Candidate Genomics" not in titles
+    assert len(detail_calls) == 2
+    print("PASS test_fetch_html_title_exclude_drops_matching_titles")
+
+
+def test_fetch_html_without_title_filters_keeps_everything():
+    detail_calls = []
+    with patch("jobtracker.adapters.requests.get", _fake_html_get(detail_calls)):
+        jobs = fetch_html("TestOrg", {
+            "careers_url": "https://example.nl/vacatures",
+            "link_pattern": "/vacatures/[a-z-]+$",
+        })
+    assert len(jobs) == 4
+    assert len(detail_calls) == 4
+    print("PASS test_fetch_html_without_title_filters_keeps_everything")
+
+
+def test_fetch_html_title_exclude_wins_over_title_include():
+    # A title matching BOTH an include and an exclude keyword must be
+    # dropped -- exclude always wins, regardless of list order in params.
+    html = """
+    <html><body>
+      <a href="/vacatures/software-engineer">Software Engineer</a>
+      <a href="/vacatures/phd-software-engineer">PhD Candidate Software Engineer</a>
+    </body></html>
+    """
+    detail_calls = []
+
+    def fake_get(url, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status = lambda: None
+        if url.endswith("/vacatures"):
+            resp.text = html
+        else:
+            detail_calls.append(url)
+            resp.text = "<html><body><p>Full job description text.</p></body></html>"
+        return resp
+
+    with patch("jobtracker.adapters.requests.get", fake_get):
+        jobs = fetch_html("TestOrg", {
+            "careers_url": "https://example.nl/vacatures",
+            "link_pattern": "/vacatures/[a-z-]+$",
+            "title_include": ["software", "engineer"],
+            "title_exclude": ["phd"],
+        })
+    titles = [j.title for j in jobs]
+    assert titles == ["Software Engineer"]
+    assert len(detail_calls) == 1
+    print("PASS test_fetch_html_title_exclude_wins_over_title_include")
+
+
+def test_fetch_html_max_results_applies_after_title_filtering():
+    # max_results must cap the FILTERED set, not the raw listing -- a link
+    # dropped by title_include/title_exclude must never consume the budget
+    # meant for relevant results.
+    html = """
+    <html><body>
+      <a href="/vacatures/software-engineer">Software Engineer</a>
+      <a href="/vacatures/data-engineer">Data Engineer</a>
+      <a href="/vacatures/devops-engineer">DevOps Engineer</a>
+      <a href="/vacatures/verpleegkundige">Verpleegkundige</a>
+      <a href="/vacatures/phd-candidate">PhD Candidate</a>
+    </body></html>
+    """
+    detail_calls = []
+
+    def fake_get(url, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status = lambda: None
+        if url.endswith("/vacatures"):
+            resp.text = html
+        else:
+            detail_calls.append(url)
+            resp.text = "<html><body><p>Full job description text.</p></body></html>"
+        return resp
+
+    with patch("jobtracker.adapters.requests.get", fake_get):
+        jobs = fetch_html("TestOrg", {
+            "careers_url": "https://example.nl/vacatures",
+            "link_pattern": "/vacatures/[a-z-]+$",
+            "title_include": ["engineer"],
+            "max_results": 2,
+        })
+    # 3 links match "engineer"; max_results=2 must cap that filtered set to 2,
+    # not the 5 raw links, and must never detail-fetch the 2 non-matching ones.
+    assert len(jobs) == 2
+    assert len(detail_calls) == 2
+    assert all("Verpleegkundige" not in u and "phd-candidate" not in u for u in detail_calls)
+    print("PASS test_fetch_html_max_results_applies_after_title_filtering")
+
+
 def test_parse_adzuna():
     item = {
         "id": "4321",
@@ -218,6 +363,53 @@ def test_salary_setpoint():
     print("PASS test_salary_setpoint")
 
 
+def test_exclude_keyword_does_not_match_inside_a_longer_word():
+    # "arts" (Dutch for "physician") is a real decided exclude keyword, but
+    # plain substring matching would also drop any job whose text happens to
+    # contain "starts", "parts", "charts", etc.
+    rules = {"exclude_any": ["arts"]}
+    physician = Job(title="Arts", company="A", source="t",
+                     description="Je werkt als arts op de afdeling cardiologie.")
+    unrelated = Job(title="Software Engineer", company="A", source="t",
+                     description="The position starts in January; build dashboards and charts.")
+    assert not passes(physician, rules)
+    assert passes(unrelated, rules)
+    print("PASS test_exclude_keyword_does_not_match_inside_a_longer_word")
+
+
+def test_exclude_keyword_matches_dutch_plural_inflection():
+    # The exclude keyword is the Dutch singular; the actual job title is
+    # almost always the plural ("-n"/"-en" suffix). A left-anchored keyword
+    # must still match the inflected form, not just the bare singular.
+    rules = {"exclude_any": ["verpleegkundige", "laborant"]}
+    assert not passes(Job(title="Verpleegkundigen IC", company="A", source="t"), rules)
+    assert not passes(Job(title="Laboranten Pathologie", company="A", source="t"), rules)
+    print("PASS test_exclude_keyword_matches_dutch_plural_inflection")
+
+
+def test_exclude_tail_compound_needs_its_own_keyword():
+    # "arts" alone can't exclude a tail compound like "huisarts" without also
+    # breaking it as a standalone word / left-anchored prefix elsewhere --
+    # that's why profile.example.yaml lists "huisarts"/"tandarts" separately.
+    generic_only = {"exclude_any": ["arts"]}
+    with_compound = {"exclude_any": ["arts", "huisarts"]}
+    huisarts = Job(title="Huisarts", company="A", source="t")
+    assert passes(huisarts, generic_only)       # the residual gap
+    assert not passes(huisarts, with_compound)  # closed by the explicit keyword
+    print("PASS test_exclude_tail_compound_needs_its_own_keyword")
+
+
+def test_title_include_matches_truncated_prefix():
+    # "bioinformatic" is a deliberately truncated include keyword meant to
+    # match several inflections/spellings at once.
+    keywords = ["bioinformatic", "engineer"]
+    for title in ["Bioinformatician", "Bioinformatics Specialist",
+                  "Bioinformatica Analist", "Senior Engineering Manager"]:
+        assert _title_matches_any(title, keywords), title
+    assert not _title_matches_any("Verpleegkundige IC", keywords)
+    print("PASS test_title_include_matches_truncated_prefix")
+
+
 if __name__ == "__main__":
     test_parse_greenhouse()
     test_parse_lever()
@@ -227,7 +419,16 @@ if __name__ == "__main__":
     test_extract_html_links()
     test_extract_html_links_generic_cta_uses_title_attr()
     test_extract_html_links_generic_cta_dutch()
+    test_fetch_html_title_include_skips_detail_fetch_for_non_matching()
+    test_fetch_html_title_exclude_drops_matching_titles()
+    test_fetch_html_without_title_filters_keeps_everything()
+    test_fetch_html_title_exclude_wins_over_title_include()
+    test_fetch_html_max_results_applies_after_title_filtering()
     test_parse_adzuna()
     test_parse_jooble()
     test_salary_setpoint()
+    test_exclude_keyword_does_not_match_inside_a_longer_word()
+    test_exclude_keyword_matches_dutch_plural_inflection()
+    test_exclude_tail_compound_needs_its_own_keyword()
+    test_title_include_matches_truncated_prefix()
     print("\nAll new-adapter tests passed.")

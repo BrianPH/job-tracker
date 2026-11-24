@@ -30,6 +30,7 @@ python -m tests.test_pipeline
 python -m tests.test_storage_upsert
 python -m tests.test_scorer
 python -m tests.test_new_adapters
+python -m tests.test_example_configs
 python -m tests.test_generator
 python -m tests.test_webapp
 ```
@@ -45,7 +46,14 @@ python -m tests.test_webapp
   re-scrapes.
 - **Instellingen (setpoints)** — edit keywords, exclusions, locations,
   **minimum salary**, remote rule, profile text and the daily scrape hour from
-  the browser. Saved to `config/profile.yaml`.
+  the browser. Saved to `config/profile.yaml`. Keyword/exclusion matching is
+  left-anchored, not plain substring: a keyword matches as a whole word or as
+  the start of a longer word (so a short keyword like `arts` no longer
+  wrongly matches inside `starts`/`parts`, and a deliberately short keyword
+  like `bioinformatic` still matches `bioinformatics`/`bioinformatician`),
+  but it will NOT match a keyword glued onto the END of a longer word (e.g.
+  `arts` alone does not match the compound `huisarts`) — list such compounds
+  as their own keyword instead.
 - **Scrape nu** — run the whole pipeline in the background; live log at
   `/scrape/log`.
 - **CV + brief** — per vacancy, generates a tailored CV and motivation letter
@@ -96,8 +104,10 @@ Keep `config/candidate.yaml` up to date when your CV changes.
 | remoteok | tag-filtered (python/backend/dev) | public JSON (remote, international) |
 | adzuna | NL software + bioinformatics searches | official API, free key (aggregator) |
 | jooble | NL software + bioinformatics searches | official API, free key (aggregator) |
-| academictransfer | none currently (LUMC/Erasmus MC/Naturalis disabled, see below) | public search API (best-effort) |
-| html | The Hyve, NKI, Hartwig Medical Foundation, UMCG/ERIBA | generic anchor scraper |
+| academictransfer | none currently (LUMC disabled, see below) | public search API (best-effort) |
+| html | The Hyve, NKI, Hartwig Medical Foundation, UMCG/ERIBA; TU Delft, Erasmus MC, Naturalis Biodiversity Center available in `config/companies.example.yaml`*; KNAW, Leiden University also in that file but disabled pending link-pattern verification | generic anchor scraper |
+
+\* Entries in `config/companies.example.yaml` are reference-only -- copy the ones you want into your real `config/companies.yaml` before they're part of any actual run.
 
 Adding a company on an existing platform = one entry in `config/companies.yaml`.
 Verify a Greenhouse board via `https://boards-api.greenhouse.io/v1/boards/<board>/jobs`,
@@ -111,13 +121,32 @@ with `python check_source.py <careers_url> [link_pattern]` before adding it to
 `companies.yaml`; it fetches the page with the same headers `fetch_html` uses
 and reports how many vacancy links the pattern matches.
 
+A university, UMC or research-institute careers page often lists far more
+vacancies than the generic adapters elsewhere, and most of them are clinical
+or academic rather than software/IT roles. Two extra `html` params filter
+*before* the detail-page fetch, so an excluded vacancy never costs a request
+and never eats into `max_results`: `title_include` (a list of keywords — only
+titles containing at least one get a detail fetch at all) and `title_exclude`
+(titles containing any of these are dropped even if `title_include` would
+otherwise match — used for PhD/clinical roles). See
+`config/companies.example.yaml` for worked examples, including the entries
+added for TU Delft, KNAW, Leiden University, Erasmus MC, and Naturalis
+Biodiversity Center. That file also records which of the originally-planned
+sources in that round (Erasmus University Rotterdam, UvA, VU Amsterdam, UMC
+Utrecht, Princess Máxima Center, the eScience Center, IKNL, TNO) could not be
+verified yet — their listings are either client-rendered, or the careers URL
+used in planning turned out to be wrong.
+
 Mollie and Zapier moved from Greenhouse/Lever to Ashby. HUB Organoids
-(Teamtailor, custom domain), BaseClear and Single Cell Discoveries (both
-`html`), and AcademicTransfer's three Dutch institutes (LUMC, Erasmus MC,
-Naturalis) are disabled in `config/companies.yaml`, each with a comment
-that explains the reason: their source sites return genuine errors, or
-their page structure cannot be scraped by the generic adapters. A URL
-change alone does not fix these.
+(Teamtailor, custom domain) and BaseClear and Single Cell Discoveries (both
+`html`) are disabled in `config/companies.yaml`, each with a comment that
+explains the reason: their source sites return genuine errors, or their page
+structure cannot be scraped by the generic adapters. A URL change alone does
+not fix these. LUMC is disabled for the same underlying reason — its listing
+is rendered client-side — and stays disabled until the planned
+Playwright-based adapter lands; Erasmus MC and Naturalis Biodiversity Center
+used to be attempted through `academictransfer` as well, but now have working
+direct `html` entries instead (see `config/companies.example.yaml`).
 
 International remote roles are kept by the rule `always_keep_remote: true` even
 when they don't match your location list.
@@ -207,6 +236,14 @@ Edit `CASES` in `score_test.py` to add your own test vacancies.
   `min_salary` / `always_keep_remote`), profile text, `app.scrape_hour`.
   Editable via the web UI.
 - `config/candidate.yaml` — structured CV facts for document generation.
+
+All three files above hold personal data and are git-ignored. If
+`config/profile.yaml` is missing, the pipeline and generator fall back to
+`config/profile.example.yaml`, which is tracked in the repo — copy it to
+`config/profile.yaml` and fill in your own details. `config/companies.yaml`
+has no such runtime fallback; `config/companies.example.yaml` is only a
+reference list of entries to copy in by hand (see the Sources section
+above).
 
 ## How it fits together
 

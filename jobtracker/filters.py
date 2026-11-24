@@ -40,17 +40,36 @@ def _text(job: Job) -> str:
     return f"{job.title}\n{job.description}".lower()
 
 
+def _contains_keyword(text: str, keyword: str) -> bool:
+    """True if `keyword` occurs in `text`, not glued onto a preceding letter/digit.
+
+    Plain substring matching let short keywords match inside unrelated longer
+    words -- e.g. the clinical-role exclude "arts" (Dutch for "physician")
+    also matched "starts", "parts", "charts". Guarding the LEFT side only
+    (not the right) fixes that -- all three false positives have "arts"
+    glued onto a preceding letter -- while still matching a keyword used as
+    a prefix, which is the normal case here: Dutch plurals/inflections
+    ("verpleegkundige" -> "verpleegkundigen"), and deliberately truncated
+    include keywords ("bioinformatic" -> "bioinformatics"/"bioinformatician").
+    A keyword glued onto a FOLLOWING letter instead (a tail compound like
+    "huisarts") is a real residual gap -- add the compound itself as its own
+    keyword rather than trying to fix that generically here.
+    """
+    pattern = r"(?<![a-z0-9])" + re.escape(keyword)
+    return re.search(pattern, text) is not None
+
+
 def passes(job: Job, rules: dict) -> bool:
     rules = rules or {}
     text = _text(job)
     loc = job.location.lower()
 
     exclude = [w.lower() for w in rules.get("exclude_any", []) if w]
-    if any(w in text for w in exclude):
+    if any(_contains_keyword(text, w) for w in exclude):
         return False
 
     keywords = [w.lower() for w in rules.get("keywords_any", []) if w]
-    if keywords and not any(w in text for w in keywords):
+    if keywords and not any(_contains_keyword(text, w) for w in keywords):
         return False
 
     # Salary floor: only drops jobs that STATE a salary below the setpoint.

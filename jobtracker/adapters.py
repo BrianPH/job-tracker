@@ -582,6 +582,19 @@ def extract_html_links(page_html: str, base_url: str, link_pattern: str = "") ->
     return out
 
 
+def _title_matches_any(title: str, keywords: List[str]) -> bool:
+    """True if `title` contains any keyword, not glued onto a preceding
+    letter/digit (same matching rule as filters._contains_keyword -- see its
+    docstring for why only the left side is guarded).
+    """
+    t = title.lower()
+    for k in keywords:
+        pattern = r"(?<![a-z0-9])" + re.escape(k.lower())
+        if re.search(pattern, t):
+            return True
+    return False
+
+
 def fetch_html(company: str, params: dict) -> List[Job]:
     careers_url = params["careers_url"]
     if not careers_url:
@@ -589,10 +602,21 @@ def fetch_html(company: str, params: dict) -> List[Job]:
     link_pattern = params.get("link_pattern", "")
     want_detail = params.get("descriptions", True)
     max_jobs = int(params.get("max_results", 30))
+    title_include = params.get("title_include") or []
+    title_exclude = params.get("title_exclude") or []
 
     resp = requests.get(careers_url, headers=BROWSER_HEADERS, timeout=TIMEOUT)
     resp.raise_for_status()
-    links = extract_html_links(resp.text, careers_url, link_pattern)[:max_jobs]
+    links = extract_html_links(resp.text, careers_url, link_pattern)
+
+    # Filter by title BEFORE the detail fetch (and before the max_results cut),
+    # so an irrelevant listing (e.g. clinical roles on a UMC site) never costs
+    # a detail request or eats into the result budget meant for relevant ones.
+    if title_include:
+        links = [(t, u) for t, u in links if _title_matches_any(t, title_include)]
+    if title_exclude:
+        links = [(t, u) for t, u in links if not _title_matches_any(t, title_exclude)]
+    links = links[:max_jobs]
 
     jobs: List[Job] = []
     for title, url in links:

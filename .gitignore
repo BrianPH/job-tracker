@@ -183,4 +183,5 @@ cython_debug/
 
 Solliciteren/
 Applications/
-config/
+config/*
+!config/*.example.yaml
