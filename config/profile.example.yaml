@@ -38,6 +38,13 @@ rules:
     - laborant
     - "physician assistant"
     - anesthesiemedewerker
+    # Left-anchored substring matching (see filters._contains_keyword) can't
+    # exclude "arts" as a tail compound ("huisarts", "tandarts") without also
+    # breaking it as a standalone word or as a left-anchored prefix
+    # elsewhere -- list the compounds that matter explicitly instead.
+    - huisarts
+    - tandarts
+    - basisarts
   # Randstad-area locations added 2026-11-24 for the university/UMC/institute
   # source expansion.
   locations_any:
