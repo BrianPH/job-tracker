@@ -64,7 +64,7 @@ def _results_page(n_cards: int, start: int = 0) -> str:
 # everything were just joined in DOM order and cut once at the end. The
 # un-anchored "benefits" block mirrors the ~800-char boilerplate every real
 # posting repeats identically -- it must NOT survive into the description.
-_DUTIES_FILLER = ("Duties filler text describing the role in detail. " * 60)[:3000]
+_DUTIES_FILLER = ("Duties filler text describing the role in detail. " * 70)[:3500]
 _BENEFITS_BOILERPLATE = ("Boilerplate IKB benefits text identical on every posting. " * 15)[:800]
 _REQUIREMENTS_FILLER = ("Requirements filler text describing what we ask. " * 40)[:1800]
 
