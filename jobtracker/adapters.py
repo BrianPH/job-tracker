@@ -645,25 +645,30 @@ def fetch_html(company: str, params: dict) -> List[Job]:
 # Hippo/BloomReach CMS. The listing at /vacatures is a client-rendered shell  #
 # -- no RSS/JSON API exists -- but the shell embeds a hidden                  #
 # <div id="/vacatures?_hn:type=component-rendering&_hn:ref=<ref>" class=     #
-# "...Async"> for the results component. Re-fetching that exact URL (with    #
-# &_hn:rid=vacancy-results appended) returns the same component SERVER-      #
-# rendered, as real HTML -- including a `werkgever=<code>` query param that  #
-# the site's own employer-filter checkboxes already use                      #
+# "...Async"> marking the results component's position in the page's        #
+# component tree. Fetching that SAME ref with &_hn:type=resource and        #
+# &_hn:rid=vacancy-results instead (the exact query fetch_werkenvoornederland #
+# below sends) returns that component SERVER-rendered as real HTML --       #
+# including a `werkgever=<code>` query param that the site's own            #
+# employer-filter checkboxes already use                                    #
 # (onclick="filterClick('werkgever', '<code>')"), confirmed server-side      #
-# (RIVM code 01760 returns only RIVM postings, not the ~1270-result          #
+# (RIVM code 01760 returns only RIVM's ~14 postings, not the ~1270-result    #
 # firehose). Find a new employer's code the same way: load /vacatures,       #
 # search the page for the employer's name, read the numeric id/value on its  #
 # checkbox <input>. Pagination: rid=vacancy-results for page 1 (also carries #
 # the total-results count), rid=append-next-page-results&pagina=<n> for      #
-# later pages; a page with no `<section class="vacancy">` (just             #
-# `<span id="lastPage">`) means there are no more.                           #
+# later pages, 20 results per page; a page returning fewer than 20 is the    #
+# last one (confirmed on a 37-result employer: page 1 = 20, page 2 = 17).    #
 # --------------------------------------------------------------------------- #
 WVN_BASE = "https://www.werkenvoornederland.nl"
 # Component ref for the vacancy-results fragment on /vacatures, discovered by
-# inspecting the hidden Async div described above. This is an address within
-# the page's component tree, not a session token -- stable across requests,
-# but tied to the site's current page template. If this adapter starts
-# returning nothing, re-discover it the same way.
+# inspecting the hidden Async div's id attribute (the `_hn:ref=<ref>` part),
+# then fetching it with &_hn:type=resource&_hn:rid=vacancy-results appended
+# instead of &_hn:type=component-rendering. This ref is an address within the
+# page's component tree, not a session token -- stable across requests, but
+# tied to the site's current page template. If this adapter starts returning
+# nothing (a 404, since a stale ref fails loudly rather than silently), find
+# the current ref the same way.
 WVN_RESULTS_REF = "r46_r1_r4"
 
 
@@ -718,21 +723,26 @@ def fetch_werkenvoornederland(company: str, params: dict) -> List[Job]:
         for section in sections:
             if len(jobs) >= max_jobs:
                 break
-            jobs.append(parse_werkenvoornederland_card(section, company))
+            job = parse_werkenvoornederland_card(section, company)
+            if not job.url:  # no detail link -> nothing to dedupe/fetch on, skip
+                continue
+            jobs.append(job)
         if len(sections) < 20:  # fewer than a full page -> this was the last one
             break
         page += 1
 
     if want_detail:
         for job in jobs:
-            if not job.url:
-                continue
             try:
                 d = requests.get(job.url, headers=BROWSER_HEADERS, timeout=TIMEOUT)
                 d.raise_for_status()
-                body = BeautifulSoup(d.text, "html.parser").find("div", class_="s-article-content")
-                if body:
-                    job.description = " ".join(body.get_text(" ", strip=True).split())[:4000]
+                # the description is split across several same-class blocks
+                # (duties, requirements, benefits, employer blurb, application
+                # notes) -- join all of them, not just the first.
+                bodies = BeautifulSoup(d.text, "html.parser").find_all("div", class_="s-article-content")
+                text = " ".join(" ".join(b.get_text(" ", strip=True).split()) for b in bodies)
+                if text:
+                    job.description = text[:4000]
             except requests.RequestException:
                 pass
     return jobs

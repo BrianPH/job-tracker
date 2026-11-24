@@ -37,9 +37,9 @@ def _card_html(href: str, title: str, employer: str, location: str, salary: str)
     """
 
 
-def _results_page(n_cards: int, start: int = 0, with_last_page_sentinel: bool = False) -> str:
-    if with_last_page_sentinel:
-        return '<span id="lastPage"></span>'
+def _results_page(n_cards: int, start: int = 0) -> str:
+    if n_cards == 0:
+        return '<span id="lastPage"></span>'  # what a page past the last one actually returns
     cards = "".join(
         _card_html(f"/vacatures/role-{start + i}-RIVM-2026-{start + i}",
                    f"Role {start + i}", "RIVM", "Bilthoven", "Schaal 11")
@@ -57,7 +57,9 @@ def _results_page(n_cards: int, start: int = 0, with_last_page_sentinel: bool = 
 
 DETAIL_HTML = """
 <html><body>
-<div class="s-article-content"><p>Full job description text for this role.</p></div>
+<div class="s-article-content"><p>Dit ga je doen: duties text.</p></div>
+<div class="s-article-content"><p>Dit vragen wij: requirements text.</p></div>
+<div class="s-article-content"><p>Over de organisatie: employer blurb.</p></div>
 </body></html>
 """
 
@@ -165,6 +167,9 @@ def test_fetch_werkenvoornederland_respects_max_results():
 
 
 def test_fetch_werkenvoornederland_fetches_description():
+    # Detail pages carry several same-class content blocks (duties,
+    # requirements, employer blurb, ...) -- all of them must end up in the
+    # description, not just the first.
     def handler(url):
         if "_hn:type=resource" in url:
             return _results_page(1)
@@ -173,8 +178,47 @@ def test_fetch_werkenvoornederland_fetches_description():
     with _fake_get(handler):
         jobs = fetch_werkenvoornederland("RIVM", {"werkgever": "01760", "descriptions": True})
     assert len(jobs) == 1
-    assert "Full job description" in jobs[0].description
+    assert "duties text" in jobs[0].description
+    assert "requirements text" in jobs[0].description
+    assert "employer blurb" in jobs[0].description
     print("PASS test_fetch_werkenvoornederland_fetches_description")
+
+
+def test_fetch_werkenvoornederland_detail_failure_leaves_description_empty():
+    # A RequestException on the detail fetch must not crash the whole run --
+    # the job still comes back, just without a description.
+    import requests as requests_mod
+
+    def handler(url):
+        if "_hn:type=resource" in url:
+            return _results_page(1)
+        raise requests_mod.RequestException("boom")
+
+    with _fake_get(handler):
+        jobs = fetch_werkenvoornederland("RIVM", {"werkgever": "01760", "descriptions": True})
+    assert len(jobs) == 1
+    assert jobs[0].description == ""
+    print("PASS test_fetch_werkenvoornederland_detail_failure_leaves_description_empty")
+
+
+def test_fetch_werkenvoornederland_skips_card_with_no_link():
+    # A card with no <a data-govan-action="view-card"> has no detail url to
+    # dedupe or fetch on -- it must be dropped, not turned into a job with an
+    # empty job_id that collides with every other such card.
+    html = """
+    <li><section class="vacancy">
+    <h2 class="vacancy__title"></h2>
+    <p class="vacancy__employer">RIVM</p>
+    </section></li>
+    """
+
+    def handler(url):
+        return html
+
+    with _fake_get(handler):
+        jobs = fetch_werkenvoornederland("RIVM", {"werkgever": "01760", "descriptions": False})
+    assert jobs == []
+    print("PASS test_fetch_werkenvoornederland_skips_card_with_no_link")
 
 
 if __name__ == "__main__":
@@ -185,4 +229,6 @@ if __name__ == "__main__":
     test_fetch_werkenvoornederland_paginates_on_full_page()
     test_fetch_werkenvoornederland_respects_max_results()
     test_fetch_werkenvoornederland_fetches_description()
+    test_fetch_werkenvoornederland_detail_failure_leaves_description_empty()
+    test_fetch_werkenvoornederland_skips_card_with_no_link()
     print("\nAll werkenvoornederland adapter tests passed.")
