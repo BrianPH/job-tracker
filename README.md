@@ -106,7 +106,10 @@ token via `https://api.ashbyhq.com/posting-api/job-board/<token>`, or a
 SmartRecruiters company id via
 `https://api.smartrecruiters.com/v1/companies/<id>/postings` (identifiers are
 case-sensitive). A failing source only logs an error; the rest of the run
-continues.
+continues. Verify a candidate `html` source — and tune its `link_pattern` —
+with `python check_source.py <careers_url> [link_pattern]` before adding it to
+`companies.yaml`; it fetches the page with the same headers `fetch_html` uses
+and reports how many vacancy links the pattern matches.
 
 Mollie and Zapier moved from Greenhouse/Lever to Ashby. HUB Organoids
 (Teamtailor, custom domain), BaseClear and Single Cell Discoveries (both
@@ -214,6 +217,8 @@ config/profile.yaml ───┘       ▲                                      
 - `jobtracker/pipeline.py` — reusable fetch→filter→score→store run.
 - `jobtracker/webapp.py` — FastAPI UI, setpoints, scheduler.
 - `jobtracker/storage.py` — Postgres / local JSON / Airtable backends.
+- `check_source.py` — stand-alone CLI to verify a candidate `html` source
+  (and tune its `link_pattern`) before adding it to `companies.yaml`.
 
 ## Roadmap
 
