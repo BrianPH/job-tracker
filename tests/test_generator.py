@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 from jobtracker.generator import (
-    DESC_CHARS,
+    GEN_DESC_CHARS,
     detect_language,
     generate_application,
     load_candidate,
@@ -50,9 +50,9 @@ def test_description_up_to_desc_chars_reaches_the_prompt_in_full():
     # Previously the letter/summary prompts truncated the description to
     # 2000/1200 chars on top of whatever the adapter already cut it to --
     # requirements near the end of a long posting were silently dropped.
-    # A description at or under DESC_CHARS must now survive completely.
+    # A description at or under GEN_DESC_CHARS must now survive completely.
     out = Path(tempfile.mkdtemp(prefix="jt_gen_"))
-    description = ("Relevant requirement near the end. " * 100)[:DESC_CHARS - 1]
+    description = ("Relevant requirement near the end. " * 100)[:GEN_DESC_CHARS - 1]
     seen_descriptions = []
 
     def fake_caller(system, user):
@@ -81,7 +81,7 @@ def test_description_beyond_desc_chars_is_capped():
     # its own bound so an unusually long posting can't blow a local model's
     # context window or run up Anthropic spend unbounded.
     out = Path(tempfile.mkdtemp(prefix="jt_gen_"))
-    description = "x" * (DESC_CHARS * 2)
+    description = "x" * (GEN_DESC_CHARS * 2)
     seen_descriptions = []
 
     def fake_caller(system, user):
@@ -95,8 +95,8 @@ def test_description_beyond_desc_chars_is_capped():
         assert len(seen_descriptions) == 2
         for prompt in seen_descriptions:
             assert description not in prompt
-            assert ("x" * DESC_CHARS) in prompt
-            assert ("x" * (DESC_CHARS + 1)) not in prompt
+            assert ("x" * GEN_DESC_CHARS) in prompt
+            assert ("x" * (GEN_DESC_CHARS + 1)) not in prompt
         print("PASS test_description_beyond_desc_chars_is_capped")
     finally:
         shutil.rmtree(out, ignore_errors=True)

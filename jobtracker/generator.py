@@ -36,7 +36,7 @@ OUTPUT_DIR = ROOT / "applications"
 # teamtailor, workday, greenhouse, lever) pass descriptions through
 # uncapped. Cap here too, at the same size, so a long posting can't blow a
 # local model's context window or run up Anthropic spend unbounded.
-DESC_CHARS = 4000
+GEN_DESC_CHARS = 4000
 
 DUTCH_MARKERS = (" en ", " het ", " een ", " wij ", " jij ", " je ", "ervaring",
                  "werkzaamheden", "functie", "vaardigheden", "kennis van", "binnen")
@@ -147,7 +147,7 @@ def generate_letter_body(job: dict, candidate: dict, profile: dict, lang: str,
             f"CANDIDATE FACTS:\n{_facts_block(candidate, profile, lang)}\n\n"
             f"VACANCY:\nTitle: {job.get('title','')}\nCompany: {job.get('company','')}\n"
             f"Location: {job.get('location','')}\n"
-            f"Description: {(job.get('description') or '')[:DESC_CHARS]}\n\n"
+            f"Description: {(job.get('description') or '')[:GEN_DESC_CHARS]}\n\n"
             f"STYLE EXAMPLE (previous letters by the same candidate):\n"
             f"{example_letter_text(lang)}\n\n"
             f"Write the letter body now, in {_lang_name(lang)}."
@@ -170,7 +170,7 @@ def generate_cv_summary(job: dict, candidate: dict, profile: dict, lang: str,
         user = (
             f"CANDIDATE FACTS:\n{_facts_block(candidate, profile, lang)}\n\n"
             f"VACANCY:\nTitle: {job.get('title','')}\nCompany: {job.get('company','')}\n"
-            f"Description: {(job.get('description') or '')[:DESC_CHARS]}\n\n"
+            f"Description: {(job.get('description') or '')[:GEN_DESC_CHARS]}\n\n"
             f"Write the tailored CV profile paragraph now, in {_lang_name(lang)}."
         )
         try:
