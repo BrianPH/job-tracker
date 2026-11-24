@@ -40,17 +40,30 @@ def _text(job: Job) -> str:
     return f"{job.title}\n{job.description}".lower()
 
 
+def _contains_keyword(text: str, keyword: str) -> bool:
+    """True if `keyword` occurs in `text` as a whole word/phrase.
+
+    Plain substring matching would let short keywords match inside unrelated
+    longer words -- e.g. the clinical-role exclude "arts" (Dutch for
+    "physician") would also match "starts", "parts", "charts". Guard only
+    against alphanumeric neighbours (not punctuation), so keywords containing
+    their own punctuation (e.g. "ph.d.") still match normally.
+    """
+    pattern = r"(?<![a-z0-9])" + re.escape(keyword) + r"(?![a-z0-9])"
+    return re.search(pattern, text) is not None
+
+
 def passes(job: Job, rules: dict) -> bool:
     rules = rules or {}
     text = _text(job)
     loc = job.location.lower()
 
     exclude = [w.lower() for w in rules.get("exclude_any", []) if w]
-    if any(w in text for w in exclude):
+    if any(_contains_keyword(text, w) for w in exclude):
         return False
 
     keywords = [w.lower() for w in rules.get("keywords_any", []) if w]
-    if keywords and not any(w in text for w in keywords):
+    if keywords and not any(_contains_keyword(text, w) for w in keywords):
         return False
 
     # Salary floor: only drops jobs that STATE a salary below the setpoint.

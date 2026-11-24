@@ -231,6 +231,80 @@ def test_fetch_html_without_title_filters_keeps_everything():
     print("PASS test_fetch_html_without_title_filters_keeps_everything")
 
 
+def test_fetch_html_title_exclude_wins_over_title_include():
+    # A title matching BOTH an include and an exclude keyword must be
+    # dropped -- exclude always wins, regardless of list order in params.
+    html = """
+    <html><body>
+      <a href="/vacatures/software-engineer">Software Engineer</a>
+      <a href="/vacatures/phd-software-engineer">PhD Candidate Software Engineer</a>
+    </body></html>
+    """
+    detail_calls = []
+
+    def fake_get(url, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status = lambda: None
+        if url.endswith("/vacatures"):
+            resp.text = html
+        else:
+            detail_calls.append(url)
+            resp.text = "<html><body><p>Full job description text.</p></body></html>"
+        return resp
+
+    with patch("jobtracker.adapters.requests.get", fake_get):
+        jobs = fetch_html("TestOrg", {
+            "careers_url": "https://example.nl/vacatures",
+            "link_pattern": "/vacatures/[a-z-]+$",
+            "title_include": ["software", "engineer"],
+            "title_exclude": ["phd"],
+        })
+    titles = [j.title for j in jobs]
+    assert titles == ["Software Engineer"]
+    assert len(detail_calls) == 1
+    print("PASS test_fetch_html_title_exclude_wins_over_title_include")
+
+
+def test_fetch_html_max_results_applies_after_title_filtering():
+    # max_results must cap the FILTERED set, not the raw listing -- a link
+    # dropped by title_include/title_exclude must never consume the budget
+    # meant for relevant results.
+    html = """
+    <html><body>
+      <a href="/vacatures/software-engineer">Software Engineer</a>
+      <a href="/vacatures/data-engineer">Data Engineer</a>
+      <a href="/vacatures/devops-engineer">DevOps Engineer</a>
+      <a href="/vacatures/verpleegkundige">Verpleegkundige</a>
+      <a href="/vacatures/phd-candidate">PhD Candidate</a>
+    </body></html>
+    """
+    detail_calls = []
+
+    def fake_get(url, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status = lambda: None
+        if url.endswith("/vacatures"):
+            resp.text = html
+        else:
+            detail_calls.append(url)
+            resp.text = "<html><body><p>Full job description text.</p></body></html>"
+        return resp
+
+    with patch("jobtracker.adapters.requests.get", fake_get):
+        jobs = fetch_html("TestOrg", {
+            "careers_url": "https://example.nl/vacatures",
+            "link_pattern": "/vacatures/[a-z-]+$",
+            "title_include": ["engineer"],
+            "max_results": 2,
+        })
+    # 3 links match "engineer"; max_results=2 must cap that filtered set to 2,
+    # not the 5 raw links, and must never detail-fetch the 2 non-matching ones.
+    assert len(jobs) == 2
+    assert len(detail_calls) == 2
+    assert all("Verpleegkundige" not in u and "phd-candidate" not in u for u in detail_calls)
+    print("PASS test_fetch_html_max_results_applies_after_title_filtering")
+
+
 def test_parse_adzuna():
     item = {
         "id": "4321",
@@ -288,6 +362,20 @@ def test_salary_setpoint():
     print("PASS test_salary_setpoint")
 
 
+def test_exclude_keyword_does_not_match_inside_a_longer_word():
+    # "arts" (Dutch for "physician") is a real decided exclude keyword, but
+    # plain substring matching would also drop any job whose text happens to
+    # contain "starts", "parts", "charts", etc.
+    rules = {"exclude_any": ["arts"]}
+    physician = Job(title="Arts", company="A", source="t",
+                     description="Je werkt als arts op de afdeling cardiologie.")
+    unrelated = Job(title="Software Engineer", company="A", source="t",
+                     description="The position starts in January; build dashboards and charts.")
+    assert not passes(physician, rules)
+    assert passes(unrelated, rules)
+    print("PASS test_exclude_keyword_does_not_match_inside_a_longer_word")
+
+
 if __name__ == "__main__":
     test_parse_greenhouse()
     test_parse_lever()
@@ -300,7 +388,10 @@ if __name__ == "__main__":
     test_fetch_html_title_include_skips_detail_fetch_for_non_matching()
     test_fetch_html_title_exclude_drops_matching_titles()
     test_fetch_html_without_title_filters_keeps_everything()
+    test_fetch_html_title_exclude_wins_over_title_include()
+    test_fetch_html_max_results_applies_after_title_filtering()
     test_parse_adzuna()
     test_parse_jooble()
     test_salary_setpoint()
+    test_exclude_keyword_does_not_match_inside_a_longer_word()
     print("\nAll new-adapter tests passed.")
