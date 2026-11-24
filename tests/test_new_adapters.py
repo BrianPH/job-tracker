@@ -1,7 +1,11 @@
 """Offline tests for the greenhouse, lever, remotive, remoteok, academictransfer
-and html adapters (parsers only — no network)."""
+and html adapters (parsers only, except the fetch_html title-filter tests, which
+monkeypatch requests.get with an in-memory fake -- no real network)."""
+from unittest.mock import MagicMock, patch
+
 from jobtracker.adapters import (
     extract_html_links,
+    fetch_html,
     parse_adzuna_job,
     parse_jooble_job,
     parse_academictransfer_result,
@@ -161,6 +165,72 @@ def test_extract_html_links_generic_cta_dutch():
     print("PASS test_extract_html_links_generic_cta_dutch")
 
 
+_LISTING_HTML = """
+<html><body>
+  <a href="/vacatures/software-engineer">Software Engineer</a>
+  <a href="/vacatures/data-scientist">Data Scientist</a>
+  <a href="/vacatures/verpleegkundige-cardiologie">Verpleegkundige Cardiologie</a>
+  <a href="/vacatures/phd-candidate-genomics">PhD Candidate Genomics</a>
+</body></html>
+"""
+
+
+def _fake_html_get(detail_calls):
+    def _fake(url, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status = lambda: None
+        if url.endswith("/vacatures"):
+            resp.text = _LISTING_HTML
+        else:
+            detail_calls.append(url)
+            resp.text = "<html><body><p>Full job description text.</p></body></html>"
+        return resp
+    return _fake
+
+
+def test_fetch_html_title_include_skips_detail_fetch_for_non_matching():
+    detail_calls = []
+    with patch("jobtracker.adapters.requests.get", _fake_html_get(detail_calls)):
+        jobs = fetch_html("TestOrg", {
+            "careers_url": "https://example.nl/vacatures",
+            "link_pattern": "/vacatures/[a-z-]+$",
+            "title_include": ["software", "data", "engineer", "scientist"],
+        })
+    titles = [j.title for j in jobs]
+    assert "Software Engineer" in titles and "Data Scientist" in titles
+    assert "Verpleegkundige Cardiologie" not in titles and "PhD Candidate Genomics" not in titles
+    # the two non-matching links must never have triggered a detail request
+    assert len(detail_calls) == 2
+    print("PASS test_fetch_html_title_include_skips_detail_fetch_for_non_matching")
+
+
+def test_fetch_html_title_exclude_drops_matching_titles():
+    detail_calls = []
+    with patch("jobtracker.adapters.requests.get", _fake_html_get(detail_calls)):
+        jobs = fetch_html("TestOrg", {
+            "careers_url": "https://example.nl/vacatures",
+            "link_pattern": "/vacatures/[a-z-]+$",
+            "title_exclude": ["verpleegkundige", "phd"],
+        })
+    titles = [j.title for j in jobs]
+    assert "Software Engineer" in titles and "Data Scientist" in titles
+    assert "Verpleegkundige Cardiologie" not in titles and "PhD Candidate Genomics" not in titles
+    assert len(detail_calls) == 2
+    print("PASS test_fetch_html_title_exclude_drops_matching_titles")
+
+
+def test_fetch_html_without_title_filters_keeps_everything():
+    detail_calls = []
+    with patch("jobtracker.adapters.requests.get", _fake_html_get(detail_calls)):
+        jobs = fetch_html("TestOrg", {
+            "careers_url": "https://example.nl/vacatures",
+            "link_pattern": "/vacatures/[a-z-]+$",
+        })
+    assert len(jobs) == 4
+    assert len(detail_calls) == 4
+    print("PASS test_fetch_html_without_title_filters_keeps_everything")
+
+
 def test_parse_adzuna():
     item = {
         "id": "4321",
@@ -227,6 +297,9 @@ if __name__ == "__main__":
     test_extract_html_links()
     test_extract_html_links_generic_cta_uses_title_attr()
     test_extract_html_links_generic_cta_dutch()
+    test_fetch_html_title_include_skips_detail_fetch_for_non_matching()
+    test_fetch_html_title_exclude_drops_matching_titles()
+    test_fetch_html_without_title_filters_keeps_everything()
     test_parse_adzuna()
     test_parse_jooble()
     test_salary_setpoint()
