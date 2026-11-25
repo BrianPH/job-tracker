@@ -125,6 +125,17 @@ original posting is taken offline. Jobs generated this way are **not** added
 to the main vacancy board; they only exist for the duration of the
 generation request and its downloadable `.docx` files.
 
+**Security note.** `/ingest` fetches whatever URL the form is given,
+server-side, with no restriction on scheme or target host. On a trusted
+single-user network this is the same risk class as any other personal tool
+that fetches a URL you paste in yourself. If you run with `python run_web.py
+--lan` on a network you don't fully trust, be aware that a malicious or
+compromised client on that network could submit a URL pointing at an
+internal host (for example the Postgres container) rather than a real
+vacancy page. See issue #19 for tracked hardening work (restrict to
+`http`/`https`, reject private/loopback-resolving hosts, cap response
+size).
+
 ---
 
 ## Sources
