@@ -188,4 +188,5 @@ config/*
 # docxtpl .docx templates hold layout + Jinja placeholders, never personal
 # data (facts come from candidate.yaml at render time), so they're tracked.
 !config/templates/
-!config/templates/**
+config/templates/*
+!config/templates/*.docx
