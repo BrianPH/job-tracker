@@ -29,3 +29,19 @@ CREATE INDEX IF NOT EXISTS jobs_company_idx ON jobs (company);
 CREATE INDEX IF NOT EXISTS jobs_status_idx  ON jobs (status);
 CREATE INDEX IF NOT EXISTS jobs_seen_idx    ON jobs (first_seen);
 CREATE INDEX IF NOT EXISTS jobs_fit_idx     ON jobs (fit_score);
+
+-- Snapshot of a vacancy ingested from a bare URL/pasted text (for CV/letter
+-- generation that didn't start from an already-scraped job). Kept even after
+-- the posting goes offline, so the text is still available before an
+-- interview. Separate from `jobs` since these aren't scraped/scored sources.
+CREATE TABLE IF NOT EXISTS vacancy_snapshots (
+    snapshot_id     TEXT PRIMARY KEY,
+    url             TEXT NOT NULL,
+    job_id          TEXT,
+    platform        TEXT,
+    raw_source      TEXT,
+    extracted_text  TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS vacancy_snapshots_job_idx ON vacancy_snapshots (job_id);
