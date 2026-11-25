@@ -12,6 +12,7 @@ from jobtracker.generation_schema import AnalysisResult, TailorResult
 from jobtracker.tailor import (
     GenerationTruncatedError,
     GenerationUnavailableError,
+    allowed_terms,
     analyse_vacancy,
     make_client,
     tailor_application,
@@ -170,7 +171,24 @@ def test_tailor_application_valid_response():
     assert kwargs["output_format"] is TailorResult
     assert "examplecorp" in kwargs["messages"][0]["content"]  # bullet bank reached the prompt
     assert "Data Engineer" in kwargs["messages"][0]["content"]
+    assert "example-university" in kwargs["messages"][0]["content"]  # education ids too
     print("PASS test_tailor_application_valid_response")
+
+
+def test_allowed_terms_includes_company_and_keywords():
+    job = {"title": "Data Engineer", "company": "Initech", "description": "Build things."}
+    analysis = AnalysisResult(language="en", keywords=["Kubernetes", "AWS"])
+    terms = allowed_terms(job, analysis)
+    assert "Initech" in terms
+    assert "Kubernetes" in terms and "AWS" in terms
+    print("PASS test_allowed_terms_includes_company_and_keywords")
+
+
+def test_allowed_terms_skips_missing_company():
+    job = {"title": "Data Engineer", "description": "Build things."}
+    analysis = AnalysisResult(language="en")
+    assert allowed_terms(job, analysis) == []
+    print("PASS test_allowed_terms_skips_missing_company")
 
 
 def test_tailor_application_truncated_raises():
@@ -273,4 +291,6 @@ if __name__ == "__main__":
     test_tailor_application_propagates_sdk_errors()
     test_make_client_returns_none_without_api_key()
     test_make_client_accepts_auth_token()
+    test_allowed_terms_includes_company_and_keywords()
+    test_allowed_terms_skips_missing_company()
     print("\nAll tailor tests passed.")

@@ -78,7 +78,7 @@ def _word_count(text: str) -> int:
 
 
 def _candidate_ids(candidate: dict) -> tuple:
-    """Returns (role_ids, bullets_by_role, skill_names)."""
+    """Returns (role_ids, bullets_by_role, skill_names, education_ids)."""
     role_ids = set()
     bullets_by_role: Dict[str, set] = {}
     for role in candidate.get("experience", []) or []:
@@ -91,7 +91,11 @@ def _candidate_ids(candidate: dict) -> tuple:
     skill_names = {
         s.get("name", "") for s in (candidate.get("skills") or []) if isinstance(s, dict)
     }
-    return role_ids, bullets_by_role, skill_names
+    education_ids = {
+        edu["id"] for edu in (candidate.get("education") or [])
+        if isinstance(edu, dict) and edu.get("id")
+    }
+    return role_ids, bullets_by_role, skill_names, education_ids
 
 
 def validate_tailor_result(result: TailorResult, candidate: dict,
@@ -108,8 +112,13 @@ def validate_tailor_result(result: TailorResult, candidate: dict,
     if stop_reason == "max_tokens":
         errors.append("Reply was truncated at max_tokens -- treat as a failed generation.")
 
-    role_ids, bullets_by_role, skill_names = _candidate_ids(candidate)
+    role_ids, bullets_by_role, skill_names, education_ids = _candidate_ids(candidate)
     all_bullet_ids = {bid for ids in bullets_by_role.values() for bid in ids}
+    # TAILOR_SYSTEM asks for "bullet/fact ids" as requirement_map evidence --
+    # broader than just bullets, so a requirement can point at a role or a
+    # degree directly (e.g. "BSc required" -> the education id) without a
+    # bullet existing just to carry that fact.
+    fact_ids = all_bullet_ids | role_ids | education_ids | skill_names
 
     for role_id in result.experience_order:
         if role_id not in role_ids:
@@ -130,7 +139,7 @@ def validate_tailor_result(result: TailorResult, candidate: dict,
 
     for i, entry in enumerate(result.requirement_map):
         for evidence_id in entry.evidence:
-            if evidence_id not in all_bullet_ids and evidence_id not in skill_names:
+            if evidence_id not in fact_ids:
                 errors.append(
                     f"requirement_map[{i}].evidence references unknown id {evidence_id!r}.")
 
@@ -156,6 +165,7 @@ _COMMON_CAPITALIZED_WORDS = {
     "groet", "mijn", "mevrouw", "heer", "team", "best", "hello", "hi",
     "having", "working", "during", "after", "through", "additionally",
     "daarnaast", "verder", "tijdens", "hierdoor", "bovendien", "tevens",
+    "bij", "ook", "als", "omdat", "zoals", "naast", "echter",
     "january", "february", "march", "april", "may", "june", "july", "august",
     "september", "october", "november", "december",
     "januari", "februari", "maart", "mei", "juni", "juli", "augustus",

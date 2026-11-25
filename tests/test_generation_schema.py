@@ -124,6 +124,23 @@ def test_validate_accepts_requirement_map_evidence_bullet_or_skill():
     print("PASS test_validate_accepts_requirement_map_evidence_bullet_or_skill")
 
 
+def test_validate_accepts_requirement_map_evidence_role_or_education():
+    # TAILOR_SYSTEM asks the model for "role, bullet, education, or skill
+    # ids" as evidence -- a degree requirement should be able to cite the
+    # education id directly instead of needing a bullet to carry that fact.
+    from jobtracker.generation_schema import RequirementMapEntry
+    result = _valid_result()
+    result.requirement_map = [
+        RequirementMapEntry(requirement="BSc required", evidence=["example-university"],
+                            status="met"),
+        RequirementMapEntry(requirement="Backend experience", evidence=["examplecorp"],
+                            status="met"),
+    ]
+    errors = validate_tailor_result(result, CANDIDATE)
+    assert errors == []
+    print("PASS test_validate_accepts_requirement_map_evidence_role_or_education")
+
+
 # --------------------------------------------------------------------------- #
 # ground_tailor_result -- non-blocking warnings                              #
 # --------------------------------------------------------------------------- #
@@ -197,6 +214,21 @@ def test_ground_warns_on_bad_word_counts():
     print("PASS test_ground_warns_on_bad_word_counts")
 
 
+def test_ground_ignores_common_dutch_connectors():
+    result = _valid_result(
+        language="nl",
+        profile="Een aangepaste profielparagraaf. " * 10,
+        letter_paragraphs=[
+            "Bij Example Corp werkte ik met Python. Ook had ik ervaring met SQL. "
+            "Als ontwikkelaar bracht ik kwaliteit. " * 6
+        ],
+    )
+    warnings = ground_tailor_result(result, CANDIDATE)
+    assert not any(w.startswith("'Bij'") or w.startswith("'Ook'") or w.startswith("'Als'")
+                   for w in warnings)
+    print("PASS test_ground_ignores_common_dutch_connectors")
+
+
 def test_ground_extra_allowed_terms_suppresses_employer_name():
     result = _valid_result(
         profile="A tailored profile paragraph. " * 10,
@@ -232,12 +264,14 @@ if __name__ == "__main__":
     test_requirement_map_status_is_a_pydantic_literal()
     test_validate_rejects_unknown_requirement_map_evidence()
     test_validate_accepts_requirement_map_evidence_bullet_or_skill()
+    test_validate_accepts_requirement_map_evidence_role_or_education()
     test_ground_flags_invented_employer_and_year()
     test_ground_does_not_flag_real_facts()
     test_ground_ignores_common_structural_words()
     test_ground_does_not_mask_invented_fact_via_substring()
     test_ground_flags_invented_years_of_experience()
     test_ground_warns_on_bad_word_counts()
+    test_ground_ignores_common_dutch_connectors()
     test_ground_extra_allowed_terms_suppresses_employer_name()
     test_analysis_result_defaults()
     print("\nAll generation_schema tests passed.")
