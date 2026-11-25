@@ -90,7 +90,54 @@ profile paragraph and the letter body, style-guided by your example letters in
 `Solliciteren/Motivatie.docx`. Without a reachable LLM a solid fact-based
 template is used instead, so generation always works.
 
-Keep `config/candidate.yaml` up to date when your CV changes.
+Keep `config/candidate.yaml` up to date when your CV changes. It isn't
+tracked (git-ignored, like the other personal config files); copy
+`config/candidate.example.yaml` to `config/candidate.yaml` and fill in your
+own details. See that file's own comments for the full schema — in short,
+each `experience` entry has a stable `id` and a **bullet bank**: a list of
+`bullets`, each with its own `id`, free-form `tags`, and `nl`/`en` text. A
+future tailoring step (picking/ordering bullets per vacancy) will reference
+these ids; it will only ever select existing bullet text, never write new
+bullet text, so a tailored CV stays verifiable against these facts.
+
+### Document layout: docxtpl templates
+
+The CV and letter `.docx` files are rendered from
+[`docxtpl`](https://docxtpl.readthedocs.io/) templates in
+`config/templates/` (`cv_nl.docx`, `cv_en.docx`, `letter_nl.docx`,
+`letter_en.docx`) — Word documents with Jinja placeholders — rather than a
+layout built in Python. Unlike the other `config/` files, these templates
+hold no personal data (the facts are injected from `candidate.yaml` at
+render time), so they're tracked in the repo and ship with a minimal
+placeholder design. Swap in your own Word design by replacing these files
+with the same Jinja tags; no code change is needed. The exact tags each
+template expects are defined by `jobtracker/generator.py`'s
+`cv_render_context`/`letter_render_context` (the data passed to the
+template at render time).
+
+The four placeholder `.docx` files are generated, not hand-edited —
+`build_templates.py` is the single source for their content. Regenerate
+and commit the result after any layout change there, rather than editing
+the binaries directly, so they stay reproducible and diffable in spirit
+(even though the committed files themselves are binary, the script that
+produces them is reviewable):
+
+```bash
+python build_templates.py
+```
+
+### One-time import helper
+
+```bash
+python import_candidate.py my_cv.txt --out config/candidate.draft.yaml
+```
+
+Converts a plain-text export of your CV into a `candidate.yaml`-shaped draft
+via the LLM backend configured for generation (`GENERATOR_BACKEND`). The
+output is for **manual review only** — read it, correct anything wrong or
+missing, then rename/copy it to `config/candidate.yaml` yourself; the script
+never writes there directly. After that one-time bootstrap, `candidate.yaml`
+is the single source of facts.
 
 ### Generating from a bare URL
 
@@ -307,12 +354,18 @@ backend choice as `jobs`: a `vacancy_snapshots` table on Postgres, or
 pasted text.
 
 All three files above hold personal data and are git-ignored. If
-`config/profile.yaml` is missing, the pipeline and generator fall back to
-`config/profile.example.yaml`, which is tracked in the repo — copy it to
-`config/profile.yaml` and fill in your own details. `config/companies.yaml`
-has no such runtime fallback; `config/companies.example.yaml` is only a
-reference list of entries to copy in by hand (see the Sources section
-above).
+`config/profile.yaml` or `config/candidate.yaml` is missing, the pipeline and
+generator fall back to `config/profile.example.yaml` /
+`config/candidate.example.yaml`, both tracked in the repo — copy whichever
+you need to the real filename and fill in your own details.
+`config/companies.yaml` has no such runtime fallback; `config/companies.example.yaml`
+is only a reference list of entries to copy in by hand (see the Sources
+section above).
+
+`config/templates/*.docx` (the docxtpl CV/letter layouts, see
+[Document layout](#document-layout-docxtpl-templates)) are the one part of
+`config/` that ISN'T personal data and ISN'T git-ignored — they're tracked
+like any other repo asset.
 
 ## How it fits together
 
@@ -323,14 +376,19 @@ config/profile.yaml ───┘       ▲                                      
                                │
         run.py (CLI) ── run_web.py (FastAPI UI + APScheduler daily run)
                                │
-        config/candidate.yaml ─► generator ─► applications/<Company>_<Title>/*.docx
+        config/candidate.yaml ─┐
+        config/templates/*.docx ─► generator (docxtpl) ─► applications/<Company>_<Title>/*.docx
 ```
 
 - `jobtracker/models.py` — the `Job` schema + HTML cleaner.
 - `jobtracker/adapters.py` — one function per platform; returns `list[Job]`.
 - `jobtracker/filters.py` — rule filter incl. salary setpoint.
 - `jobtracker/scorer.py` — LLM fit-scoring (local Ollama, or Anthropic).
-- `jobtracker/generator.py` — CV + motivation letter .docx generation.
+- `jobtracker/generator.py` — CV + motivation letter generation: builds the
+  facts/render context from `candidate.yaml` and renders it into the
+  `config/templates/*.docx` layouts via docxtpl.
+- `jobtracker/candidate_import.py` — one-time CV-text → `candidate.yaml`-shaped
+  draft, used by `import_candidate.py`.
 - `jobtracker/ingest.py` — generate from a bare URL/pasted text: known-platform
   detail re-fetch, trafilatura extraction, optional Playwright fallback.
 - `jobtracker/snapshots.py` — `vacancy_snapshots` storage for ingested vacancies.
@@ -339,6 +397,10 @@ config/profile.yaml ───┘       ▲                                      
 - `jobtracker/storage.py` — Postgres / local JSON / Airtable backends.
 - `check_source.py` — stand-alone CLI to verify a candidate `html` source
   (and tune its `link_pattern`) before adding it to `companies.yaml`.
+- `import_candidate.py` — stand-alone CLI, draft `candidate.yaml` from your
+  CV text (see [One-time import helper](#one-time-import-helper)).
+- `build_templates.py` — regenerates the placeholder `config/templates/*.docx`
+  files (see [Document layout](#document-layout-docxtpl-templates)).
 
 ## Roadmap
 
@@ -352,5 +414,6 @@ config/profile.yaml ───┘       ▲                                      
 - [x] CV + motivation letter generation per vacancy
 - [x] Daily scheduled scrape (in the web app)
 - [x] Generate a CV + brief from a bare vacancy URL or pasted text
+- [x] docxtpl CV/letter templates + candidate.yaml bullet bank
 - [ ] E-mail/Slack digest of new high-score matches
 - [ ] Playwright-based adapter for JS-rendered career sites

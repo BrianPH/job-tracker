@@ -1,0 +1,96 @@
+# Example candidate.yaml -- copy to config/candidate.yaml and fill in your own
+# facts. This file is tracked in the repo (unlike your real candidate.yaml,
+# which is git-ignored) so the generator and its tests always have something
+# to run against, even in a fresh checkout.
+#
+# Schema notes:
+# - Every `experience` entry and every one of its `bullets` has a stable `id`
+#   -- a short lowercase slug, unique within its list. These ids are what a
+#   future tailoring step (picking/ordering bullets per vacancy) will
+#   reference; the LLM only ever selects existing bullet ids, it never writes
+#   bullet text, so the tailored CV stays verifiable against these facts.
+# - Each bullet carries both `nl` and `en` text plus free-form `tags` (used
+#   later to help a tailoring step pick relevant bullets for a vacancy).
+# - Fields with an `_en` suffix are the English counterpart of the plain
+#   field; when the generator renders in English and an `_en` field is
+#   missing, it falls back to the plain field.
+
+personal:
+  name: Alex Example
+  address: Utrecht, NL
+  email: alex.example@example.com
+  phone: "+31 6 00000000"
+
+experience:
+  - id: examplecorp
+    title: Software Ontwikkelaar
+    title_en: Software Developer
+    company: Example Corp
+    period: "2023 - heden"
+    period_en: "2023 - present"
+    bullets:
+      - id: examplecorp-pipelines
+        tags: [python, data, pipelines]
+        nl: "Bouwde en onderhield Python-datapipelines die dagelijks duizenden records verwerken."
+        en: "Built and maintained Python data pipelines processing thousands of records daily."
+      - id: examplecorp-cicd
+        tags: [devops, ci-cd, docker]
+        nl: "Richtte CI/CD-pipelines in met Docker en GitHub Actions, waardoor de deploytijd halveerde."
+        en: "Set up CI/CD pipelines with Docker and GitHub Actions, halving deployment time."
+      - id: examplecorp-api
+        tags: [backend, api, rest]
+        nl: "Ontwierp en bouwde een REST API die door drie interne teams wordt gebruikt."
+        en: "Designed and built a REST API used by three internal teams."
+  - id: acmesoftware
+    title: Stagiair Software-ontwikkeling
+    title_en: Software Development Intern
+    company: Acme Software
+    period: "2021 - 2022"
+    period_en: "2021 - 2022"
+    bullets:
+      - id: acmesoftware-webapp
+        tags: [web, dotnet, csharp]
+        nl: "Ontwikkelde een interne webapplicatie in C#/.NET voor de planning van projectteams."
+        en: "Developed an internal C#/.NET web application for project team scheduling."
+      - id: acmesoftware-tests
+        tags: [testing, quality]
+        nl: "Schreef geautomatiseerde tests die de regressietijd van het team verkortten."
+        en: "Wrote automated tests that shortened the team's regression testing time."
+
+education:
+  - id: example-university
+    degree: BSc Informatica
+    degree_en: BSc Computer Science
+    school: Example University
+    school_en: Example University
+    period: "2018 - 2022"
+    period_en: "2018 - 2022"
+
+skills:
+  - name: Python
+    level: Uitgebreid
+    level_en: Extensive
+    tags: [python]
+  - name: SQL
+    level: Gemiddeld
+    level_en: Intermediate
+    tags: [sql, data]
+  - name: Docker
+    level: Gemiddeld
+    level_en: Intermediate
+    tags: [devops, docker]
+
+languages:
+  - name: Nederlands
+    name_en: Dutch
+    level: Moedertaal
+    level_en: Native
+  - name: Engels
+    name_en: English
+    level: Vloeiend
+    level_en: Fluent
+
+# Additional true facts the LLM may mention but must not elaborate beyond --
+# e.g. ambitions, ongoing self-study, side projects.
+highlights:
+  - "Verdiept zich in eigen tijd in data-engineering en automatisering."
