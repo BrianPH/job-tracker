@@ -1,6 +1,8 @@
 """Issue #10: two-step analyse -> tailor pipeline via the Claude API.
 
-Replaces the single "write a profile paragraph" call (generator.py) with:
+Will eventually replace the single "write a profile paragraph" call
+(generator.py) -- not wired in yet, see the README's "not yet wired into the
+web UI" note -- with:
   1. analyse_vacancy -- Haiku (ANTHROPIC_MODEL_EXTRACT), extracts requirements/
      keywords/language/contact/deadline/application requirements from the
      vacancy text.
@@ -10,10 +12,12 @@ Replaces the single "write a profile paragraph" call (generator.py) with:
      text), letter paragraphs, and a requirement -> evidence map.
 
 Both calls use the official `anthropic` SDK's structured outputs
-(`client.messages.parse(output_format=...)`), which guarantees the reply
-parses into the Pydantic model -- callers still must run
-generation_schema.validate_tailor_result() afterwards, since "valid JSON
-shape" and "every id actually exists in candidate.yaml" are different checks.
+(`client.messages.parse(output_format=...)`): a complete reply is guaranteed
+to parse into the Pydantic model, but truncation (see GenerationTruncatedError)
+and the SDK's own exceptions (auth, rate limit, refusal) still apply. Callers
+still must run generation_schema.validate_tailor_result() afterwards even on
+a successful parse, since "valid JSON shape" and "every id actually exists in
+candidate.yaml" are different checks.
 
 No live call happens in tests (see tests/test_tailor.py) -- every test passes
 a fake client whose `messages.parse` is a plain function, matching this
@@ -25,11 +29,20 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from pydantic import ValidationError
+
 from .generation_schema import AnalysisResult, TailorResult
 from .scorer import ANTHROPIC_MODEL_EXTRACT, ANTHROPIC_MODEL_WRITE
 
 ANALYSE_MAX_TOKENS = 1024
-TAILOR_MAX_TOKENS = 4096
+# Sonnet 5 runs adaptive thinking by default when `thinking` is omitted, and
+# max_tokens caps thinking + the structured JSON reply together. The
+# TailorResult payload alone (profile, 4-6 letter paragraphs, a
+# requirement_map entry per requirement, notes) runs well over 1000 output
+# tokens before thinking is counted, so a tight budget here risks discarding
+# a paid call to truncation -- generous headroom is worth more than the
+# extra cost of unused tokens.
+TAILOR_MAX_TOKENS = 8192
 
 
 class GenerationUnavailableError(RuntimeError):
@@ -39,18 +52,51 @@ class GenerationUnavailableError(RuntimeError):
 
 class GenerationTruncatedError(RuntimeError):
     """The model's reply was cut off at max_tokens -- treated as a failed
-    generation, never rendered, per the issue's validator requirement."""
+    generation, never rendered, per the issue's validator requirement.
+
+    A genuinely truncated reply is incomplete JSON, so `messages.parse()`
+    fails Pydantic validation while building the response -- the SDK never
+    gets as far as returning an object whose `.stop_reason` we could read.
+    The `_parse_or_raise` helper below catches that `pydantic.ValidationError`
+    and raises this instead; the `stop_reason == "max_tokens"` check in the
+    functions below is kept too, in case a reply is cut exactly on a valid
+    JSON boundary and so parses despite being marked truncated."""
 
 
 def make_client():
-    """Returns an `anthropic.Anthropic` client, or None if no API key is
+    """Returns an `anthropic.Anthropic` client, or None if no credential is
     configured. Mirrors scorer.make_caller()'s "no key -> None" convention
-    rather than raising, so callers decide how to react."""
+    rather than raising, so callers decide how to react. Checks both
+    ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN (the SDK's two static
+    credential env vars); a host authenticated only via an `ant auth login`
+    OAuth profile or workload-identity federation isn't detected here, since
+    the SDK only resolves those at request time, not at construction --
+    set one of the two env vars explicitly if that matters for a deployment."""
     key = os.getenv("ANTHROPIC_API_KEY")
-    if not key:
+    auth_token = os.getenv("ANTHROPIC_AUTH_TOKEN")
+    if not key and not auth_token:
         return None
     import anthropic
-    return anthropic.Anthropic(api_key=key)
+    if key:
+        return anthropic.Anthropic(api_key=key)
+    return anthropic.Anthropic(auth_token=auth_token)
+
+
+def _parse_or_raise(client, **kwargs):
+    """Wraps `client.messages.parse(**kwargs)`: a truncated reply is
+    incomplete JSON, which fails Pydantic validation inside the SDK before
+    it ever returns -- translate that into GenerationTruncatedError so
+    callers have one error to handle instead of needing to know this SDK
+    detail. Any other exception (network, auth, rate limit) propagates
+    unchanged; callers are expected to catch anthropic's own exception
+    types (e.g. APIConnectionError, APIStatusError) for those."""
+    try:
+        return client.messages.parse(**kwargs)
+    except ValidationError as e:
+        raise GenerationTruncatedError(
+            f"Reply did not parse as valid JSON against the schema -- most likely "
+            f"truncated at max_tokens={kwargs.get('max_tokens')} (model {kwargs.get('model')})."
+        ) from e
 
 
 def _lang_name(lang: str) -> str:
@@ -134,7 +180,8 @@ def analyse_vacancy(vacancy_text: str, client=None, model: Optional[str] = None)
         raise GenerationUnavailableError("No Anthropic client available (ANTHROPIC_API_KEY unset).")
     model = model or os.getenv("ANTHROPIC_MODEL_EXTRACT", ANTHROPIC_MODEL_EXTRACT)
 
-    response = client.messages.parse(
+    response = _parse_or_raise(
+        client,
         model=model,
         max_tokens=ANALYSE_MAX_TOKENS,
         system=ANALYSE_SYSTEM,
@@ -174,7 +221,8 @@ def tailor_application(job: dict, analysis: AnalysisResult, candidate: dict,
     )
     system = TAILOR_SYSTEM.replace("{language}", _lang_name(lang))
 
-    response = client.messages.parse(
+    response = _parse_or_raise(
+        client,
         model=model,
         max_tokens=TAILOR_MAX_TOKENS,
         system=system,

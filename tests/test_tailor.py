@@ -6,6 +6,7 @@ import os
 from contextlib import contextmanager
 
 import yaml
+from pydantic import ValidationError
 
 from jobtracker.generation_schema import AnalysisResult, TailorResult
 from jobtracker.tailor import (
@@ -20,16 +21,35 @@ CANDIDATE = yaml.safe_load(open("config/candidate.example.yaml", encoding="utf-8
 
 
 @contextmanager
-def _no_api_key():
+def _no_credentials():
     """`client=None` only exercises the "no client available" path when
-    ANTHROPIC_API_KEY is genuinely unset -- don't rely on the ambient
+    neither credential env var is genuinely set -- don't rely on the ambient
     environment (CI or a dev machine may have one set for other purposes)."""
-    old = os.environ.pop("ANTHROPIC_API_KEY", None)
+    old_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+    old_token = os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
     try:
         yield
     finally:
-        if old is not None:
-            os.environ["ANTHROPIC_API_KEY"] = old
+        if old_key is not None:
+            os.environ["ANTHROPIC_API_KEY"] = old_key
+        if old_token is not None:
+            os.environ["ANTHROPIC_AUTH_TOKEN"] = old_token
+
+
+# Kept as an alias: most tests only care about ANTHROPIC_API_KEY being unset.
+_no_api_key = _no_credentials
+
+
+def _real_validation_error() -> ValidationError:
+    """A genuine pydantic.ValidationError, the same exception type
+    `messages.parse()` raises internally on a truncated/malformed reply --
+    constructed by actually failing validation, not hand-built, so the test
+    exercises the real exception type and not a stand-in."""
+    try:
+        AnalysisResult()  # missing required field `language`
+    except ValidationError as e:
+        return e
+    raise AssertionError("expected AnalysisResult() to fail validation")
 
 
 class _FakeUsage:
@@ -83,6 +103,8 @@ def test_analyse_vacancy_valid_response():
 
 
 def test_analyse_vacancy_truncated_raises():
+    # Defensive path: a reply that DOES parse but is still marked
+    # stop_reason="max_tokens" (e.g. cut exactly on a JSON boundary).
     client = _FakeClient(_FakeResponse(AnalysisResult(language="en"), stop_reason="max_tokens"))
     try:
         analyse_vacancy("Some vacancy text.", client=client)
@@ -91,6 +113,26 @@ def test_analyse_vacancy_truncated_raises():
     else:
         raise AssertionError("expected GenerationTruncatedError")
     print("PASS test_analyse_vacancy_truncated_raises")
+
+
+def test_analyse_vacancy_genuinely_truncated_raises():
+    # Realistic path: a genuinely truncated reply is incomplete JSON, so the
+    # SDK's own `messages.parse()` fails Pydantic validation internally and
+    # never returns a response object with a readable `.stop_reason` at all.
+    class _TruncatingMessages:
+        def parse(self, **kwargs):
+            raise _real_validation_error()
+
+    class _TruncatingClient:
+        messages = _TruncatingMessages()
+
+    try:
+        analyse_vacancy("Some vacancy text.", client=_TruncatingClient())
+    except GenerationTruncatedError:
+        pass
+    else:
+        raise AssertionError("expected GenerationTruncatedError")
+    print("PASS test_analyse_vacancy_genuinely_truncated_raises")
 
 
 def test_analyse_vacancy_no_client_raises():
@@ -144,6 +186,25 @@ def test_tailor_application_truncated_raises():
     print("PASS test_tailor_application_truncated_raises")
 
 
+def test_tailor_application_genuinely_truncated_raises():
+    class _TruncatingMessages:
+        def parse(self, **kwargs):
+            raise _real_validation_error()
+
+    class _TruncatingClient:
+        messages = _TruncatingMessages()
+
+    job = {"title": "Data Engineer", "company": "Acme", "description": "Build things."}
+    analysis = AnalysisResult(language="en")
+    try:
+        tailor_application(job, analysis, CANDIDATE, client=_TruncatingClient())
+    except GenerationTruncatedError:
+        pass
+    else:
+        raise AssertionError("expected GenerationTruncatedError")
+    print("PASS test_tailor_application_genuinely_truncated_raises")
+
+
 def test_tailor_application_no_client_raises():
     job = {"title": "Data Engineer", "company": "Acme", "description": "Build things."}
     analysis = AnalysisResult(language="en")
@@ -180,18 +241,36 @@ def test_tailor_application_propagates_sdk_errors():
 
 
 def test_make_client_returns_none_without_api_key():
-    with _no_api_key():
+    with _no_credentials():
         assert make_client() is None
     print("PASS test_make_client_returns_none_without_api_key")
+
+
+def test_make_client_accepts_auth_token():
+    # ANTHROPIC_AUTH_TOKEN (e.g. an `ant auth login` bearer token) is a
+    # second static credential the SDK itself resolves -- make_client()
+    # must not report "unavailable" just because ANTHROPIC_API_KEY specifically
+    # is unset.
+    with _no_credentials():
+        os.environ["ANTHROPIC_AUTH_TOKEN"] = "fake-token-for-test"
+        try:
+            client = make_client()
+        finally:
+            del os.environ["ANTHROPIC_AUTH_TOKEN"]
+        assert client is not None
+    print("PASS test_make_client_accepts_auth_token")
 
 
 if __name__ == "__main__":
     test_analyse_vacancy_valid_response()
     test_analyse_vacancy_truncated_raises()
+    test_analyse_vacancy_genuinely_truncated_raises()
     test_analyse_vacancy_no_client_raises()
     test_tailor_application_valid_response()
     test_tailor_application_truncated_raises()
+    test_tailor_application_genuinely_truncated_raises()
     test_tailor_application_no_client_raises()
     test_tailor_application_propagates_sdk_errors()
     test_make_client_returns_none_without_api_key()
+    test_make_client_accepts_auth_token()
     print("\nAll tailor tests passed.")
