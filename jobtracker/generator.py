@@ -244,21 +244,28 @@ def letter_render_context(candidate: dict, job: dict, body: str, lang: str) -> d
     }
 
 
-def build_cv_docx(candidate: dict, summary: str, lang: str, path: Path) -> Path:
+def build_cv_docx(context: dict, lang: str, path: Path) -> Path:
+    """Takes an already-built render context (cv_render_context or
+    cv_render_context_from_tailor_result, issue #11/M3b) rather than
+    building one itself -- decouples "which context" from "how to render
+    it" so both the old full-dump context and the new TailorResult-selected
+    one go through the same rendering code."""
     from docxtpl import DocxTemplate
     template = CV_TEMPLATE_PATHS.get(lang, CV_TEMPLATE_PATHS["en"])
     doc = DocxTemplate(str(template))
-    doc.render(cv_render_context(candidate, summary, lang))
+    doc.render(context)
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))
     return path
 
 
-def build_letter_docx(candidate: dict, job: dict, body: str, lang: str, path: Path) -> Path:
+def build_letter_docx(context: dict, lang: str, path: Path) -> Path:
+    """Same split as build_cv_docx: takes a letter_render_context dict rather
+    than building one itself."""
     from docxtpl import DocxTemplate
     template = LETTER_TEMPLATE_PATHS.get(lang, LETTER_TEMPLATE_PATHS["en"])
     doc = DocxTemplate(str(template))
-    doc.render(letter_render_context(candidate, job, body, lang))
+    doc.render(context)
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))
     return path

@@ -198,7 +198,8 @@ def test_build_cv_docx_renders_both_languages_without_leftover_tags():
     try:
         candidate = load_candidate(EXAMPLE_PATH)
         for lang in ("nl", "en"):
-            path = build_cv_docx(candidate, "A profile paragraph.", lang, out / f"cv_{lang}.docx")
+            ctx = cv_render_context(candidate, "A profile paragraph.", lang)
+            path = build_cv_docx(ctx, lang, out / f"cv_{lang}.docx")
             assert path.exists()
             assert _no_unrendered_tags(path)
             text = "\n".join(p.text for p in docx.Document(str(path)).paragraphs)
@@ -215,8 +216,8 @@ def test_build_letter_docx_renders_both_languages_without_leftover_tags():
         candidate = load_candidate(EXAMPLE_PATH)
         job = {"title": "Data Engineer", "company": "Acme"}
         for lang in ("nl", "en"):
-            path = build_letter_docx(candidate, job, "Body paragraph one.\nBody paragraph two.",
-                                     lang, out / f"letter_{lang}.docx")
+            ctx = letter_render_context(candidate, job, "Body paragraph one.\nBody paragraph two.", lang)
+            path = build_letter_docx(ctx, lang, out / f"letter_{lang}.docx")
             assert path.exists()
             assert _no_unrendered_tags(path)
             text = "\n".join(p.text for p in docx.Document(str(path)).paragraphs)
