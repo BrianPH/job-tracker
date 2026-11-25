@@ -320,6 +320,23 @@ def run_tailor_pipeline(job: dict, analysis: AnalysisResult, candidate: dict,
     return result, errors
 
 
+def handoff_context(candidate: dict, lang: str, style_example: str = "") -> dict:
+    """Everything `.claude/commands/tailor.md` needs to reproduce the tailor
+    call by hand (issue #11/M3b), built from the SAME prompt pieces the live
+    API path uses -- a hand-run call asks the model exactly what the live
+    path would have, not a re-derived approximation."""
+    return {
+        "language": lang,
+        "analyse_system_prompt": ANALYSE_SYSTEM,
+        "tailor_system_prompt": TAILOR_SYSTEM.replace("{language}", _lang_name(lang)),
+        "bullet_bank": _bullet_bank_text(candidate, lang),
+        "education": _education_text(candidate, lang),
+        "skills": _skills_text(candidate),
+        "style_example": style_example,
+        "response_schema": TailorResult.model_json_schema(),
+    }
+
+
 def allowed_terms(job: dict, analysis: AnalysisResult) -> list:
     """Terms to pass as `generation_schema.ground_tailor_result`'s
     `extra_allowed_terms` -- legitimately not a candidate fact, but also not
