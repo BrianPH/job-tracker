@@ -13,6 +13,7 @@ import docx
 from jobtracker.generator import (
     GEN_DESC_CHARS,
     ROOT,
+    _facts_block,
     _template_letter_body,
     build_cv_docx,
     build_letter_docx,
@@ -230,6 +231,30 @@ def test_cv_render_context_skips_malformed_entries_instead_of_crashing():
     print("PASS test_cv_render_context_skips_malformed_entries_instead_of_crashing")
 
 
+def test_cv_render_context_handles_non_dict_personal():
+    candidate = {"personal": "not a dict", "experience": [], "education": [],
+                "skills": [], "languages": []}
+    ctx = cv_render_context(candidate, "summary", "en")
+    assert ctx["name"] == ""
+    print("PASS test_cv_render_context_handles_non_dict_personal")
+
+
+def test_facts_block_falls_back_to_other_language_for_bullets():
+    # Unlike cv_render_context/the rendered letter, _facts_block only feeds
+    # an LLM prompt -- an nl-only bullet must still reach it (the model
+    # writes in the target language regardless), or a single-language
+    # candidate.yaml would describe every role with zero achievement detail.
+    candidate = {
+        "personal": {"name": "Test"},
+        "experience": [{"id": "x", "title": "Developer", "company": "Acme", "period": "2023",
+                       "bullets": [{"id": "b1", "nl": "Bouwde een systeem."}]}],
+        "education": [], "skills": [],
+    }
+    facts = _facts_block(candidate, {}, "en")
+    assert "Bouwde een systeem." in facts
+    print("PASS test_facts_block_falls_back_to_other_language_for_bullets")
+
+
 def test_letter_render_context_builds_paragraphs_from_body():
     candidate = load_candidate(EXAMPLE_PATH)
     job = {"title": "Data Engineer", "company": "Acme"}
@@ -294,6 +319,8 @@ if __name__ == "__main__":
     test_cv_render_context_maps_bullet_bank_by_language()
     test_bullet_text_does_not_leak_other_language()
     test_cv_render_context_skips_malformed_entries_instead_of_crashing()
+    test_cv_render_context_handles_non_dict_personal()
+    test_facts_block_falls_back_to_other_language_for_bullets()
     test_letter_render_context_builds_paragraphs_from_body()
     test_letter_render_context_falls_back_to_english_for_unknown_lang()
     test_build_cv_docx_renders_both_languages_without_leftover_tags()

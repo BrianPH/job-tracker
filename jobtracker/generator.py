@@ -68,6 +68,14 @@ def load_candidate(path: Path = CANDIDATE_PATH) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
+def _personal(candidate: dict) -> dict:
+    """candidate.get('personal', {}), guarded against a malformed
+    candidate.yaml where `personal` is something other than a mapping (e.g.
+    a plain string) -- every call site below does .get() on the result."""
+    p = candidate.get("personal", {})
+    return p if isinstance(p, dict) else {}
+
+
 def _lang_field(d: dict, field: str, lang: str) -> str:
     """`{field}_en` when rendering English and present, else the plain field."""
     if lang == "en":
@@ -75,13 +83,23 @@ def _lang_field(d: dict, field: str, lang: str) -> str:
     return d.get(field, "")
 
 
-def _bullet_text(bullet: dict, lang: str) -> str:
-    """Exact-language text only -- unlike _lang_field, there's no safe plain-
-    field fallback for free-text prose. Falling back to the other language
-    would silently leak Dutch bullet text into an English CV (the same risk
-    `highlights` is deliberately excluded from in the fallback letter body);
-    a bullet missing the requested language is dropped instead."""
-    return bullet.get(lang, "")
+def _bullet_text(bullet: dict, lang: str, strict: bool = True) -> str:
+    """Two different consumers need two different policies here:
+    - strict=True (default) for anything that ends up VERBATIM in a rendered
+      document (cv_render_context, the LLM-free fallback letter): falling
+      back to the other language would silently leak Dutch bullet text into
+      an English CV, the same risk `highlights` is deliberately excluded
+      from in the fallback letter body. A bullet missing the requested
+      language is dropped instead.
+    - strict=False for _facts_block, which only feeds an LLM prompt, not a
+      document -- the model reads the facts and WRITES in the target
+      language regardless, so falling back to whichever language a bullet
+      actually has avoids losing real achievement detail for a candidate.yaml
+      that's only filled in for one language (plausible for a Dutch-market
+      tool with an nl-only bullet bank)."""
+    if strict:
+        return bullet.get(lang, "")
+    return bullet.get(lang) or bullet.get("nl") or bullet.get("en") or ""
 
 
 def load_profile(path: Path = PROFILE_PATH) -> dict:
@@ -121,12 +139,16 @@ def example_letter_text(lang: str, max_chars: int = 2500) -> str:
 # LLM pieces (facts-constrained)                                               #
 # --------------------------------------------------------------------------- #
 def _facts_block(candidate: dict, profile: dict, lang: str) -> str:
-    p = candidate.get("personal", {})
+    p = _personal(candidate)
     exp_lines = []
     for e in candidate.get("experience", []):
         title = _lang_field(e, "title", lang)
         period = _lang_field(e, "period", lang)
-        bullets = [_bullet_text(b, lang) for b in e.get("bullets", []) if _bullet_text(b, lang)]
+        # strict=False: this text only feeds an LLM prompt, not a rendered
+        # document -- the model writes in the target language regardless, so
+        # an nl-only bullet should still reach it rather than being dropped.
+        bullets = [_bullet_text(b, lang, strict=False) for b in e.get("bullets", [])
+                  if _bullet_text(b, lang, strict=False)]
         exp_lines.append(f"- {title} @ {e.get('company','')} ({period}): " + " ".join(bullets))
     edu_lines = [
         f"- {_lang_field(e, 'degree', lang)}, {_lang_field(e, 'school', lang)} "
@@ -286,7 +308,7 @@ def cv_render_context(candidate: dict, summary: str, lang: str) -> dict:
     e.g. a plain string where a {name: ...} dict is expected) are skipped
     rather than crashing -- load_candidate()'s only validation is "is this
     YAML", so a typo here shouldn't take down generation entirely."""
-    p = candidate.get("personal", {})
+    p = _personal(candidate)
     experience = []
     for e in candidate.get("experience", []):
         if not isinstance(e, dict):
@@ -325,7 +347,7 @@ def cv_render_context(candidate: dict, summary: str, lang: str) -> dict:
 
 
 def letter_render_context(candidate: dict, job: dict, body: str, lang: str) -> dict:
-    p = candidate.get("personal", {})
+    p = _personal(candidate)
     labels = LETTER_LABELS.get(lang, LETTER_LABELS["en"])
     salutation = labels["salutation"] if lang == "nl" else f"Dear {job.get('company','')} team,"
     body_paragraphs = [b.strip() for b in body.split("\n") if b.strip()]
@@ -386,7 +408,7 @@ def generate_application(job: dict, out_dir: Path = OUTPUT_DIR,
     summary = generate_cv_summary(job, candidate, profile, lang, caller)
     body = generate_letter_body(job, candidate, profile, lang, caller)
 
-    name_slug = _safe((candidate.get("personal", {}) or {}).get("name", ""), max_len=30)
+    name_slug = _safe(_personal(candidate).get("name", ""), max_len=30)
     folder = out_dir / f"{_safe(job.get('company',''))}_{_safe(job.get('title',''))}"
     cv_path = build_cv_docx(candidate, summary, lang,
                             folder / (f"CV_{name_slug}.docx" if lang == "nl"
