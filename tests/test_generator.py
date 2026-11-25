@@ -13,6 +13,7 @@ import docx
 from jobtracker.generator import (
     GEN_DESC_CHARS,
     ROOT,
+    _template_letter_body,
     build_cv_docx,
     build_letter_docx,
     cv_render_context,
@@ -96,6 +97,18 @@ def test_template_letter_body_has_no_dutch_leak_in_english():
         print("PASS test_template_letter_body_has_no_dutch_leak_in_english")
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_template_letter_body_keeps_role_without_company():
+    # A role with a title and a bullet but no company must still contribute
+    # a sentence, not be silently dropped just because `company` is blank.
+    job = {"title": "Developer", "company": "Acme"}
+    candidate = {"experience": [{"id": "x", "title_en": "Freelancer", "bullets": [
+        {"id": "b1", "en": "Built a thing."},
+    ]}], "skills": [], "highlights": []}
+    body = _template_letter_body(job, candidate, "en")
+    assert "Freelancer" in body and "Built a thing." in body
+    print("PASS test_template_letter_body_keeps_role_without_company")
 
 
 def test_description_up_to_desc_chars_reaches_the_prompt_in_full():
@@ -189,9 +202,32 @@ def test_cv_render_context_maps_bullet_bank_by_language():
     first_role_nl = ctx_nl["experience"][0]
     assert first_role_en["title"] == "Software Developer"
     assert first_role_nl["title"] == "Software Ontwikkelaar"
-    assert "Built and maintained Python data pipelines" in first_role_en["bullets_line"]
-    assert "Bouwde en onderhield Python-datapipelines" in first_role_nl["bullets_line"]
+    assert any("Built and maintained Python data pipelines" in b
+              for b in first_role_en["bullets"])
+    assert any("Bouwde en onderhield Python-datapipelines" in b
+              for b in first_role_nl["bullets"])
     print("PASS test_cv_render_context_maps_bullet_bank_by_language")
+
+
+def test_bullet_text_does_not_leak_other_language():
+    # Regression test: a bullet missing the requested language must be
+    # dropped, not silently rendered in the wrong language.
+    candidate = {"experience": [{"id": "x", "company": "Acme", "bullets": [
+        {"id": "b1", "nl": "Alleen Nederlandse tekst."},
+    ]}]}
+    ctx = cv_render_context(candidate, "summary", "en")
+    assert ctx["experience"][0]["bullets"] == []
+    print("PASS test_bullet_text_does_not_leak_other_language")
+
+
+def test_cv_render_context_skips_malformed_entries_instead_of_crashing():
+    # A malformed candidate.yaml (e.g. a plain string where a {name: ...}
+    # dict is expected) must not take down generation entirely.
+    candidate = {"experience": "not a list of dicts", "education": [],
+                "skills": "Python", "languages": [{"not": "a name field"}]}
+    ctx = cv_render_context(candidate, "summary", "en")
+    assert ctx["experience"] == [] and ctx["skills"] == [] and ctx["languages"] == []
+    print("PASS test_cv_render_context_skips_malformed_entries_instead_of_crashing")
 
 
 def test_letter_render_context_builds_paragraphs_from_body():
@@ -202,6 +238,14 @@ def test_letter_render_context_builds_paragraphs_from_body():
     assert ctx["salutation"] == "Dear Acme team,"
     assert "Data Engineer" in ctx["subject_line"] and "Acme" in ctx["subject_line"]
     print("PASS test_letter_render_context_builds_paragraphs_from_body")
+
+
+def test_letter_render_context_falls_back_to_english_for_unknown_lang():
+    candidate = load_candidate(EXAMPLE_PATH)
+    job = {"title": "Data Engineer", "company": "Acme"}
+    ctx = letter_render_context(candidate, job, "Body.", "de")
+    assert ctx["closing"] == "Sincerely,"  # English labels, not a KeyError
+    print("PASS test_letter_render_context_falls_back_to_english_for_unknown_lang")
 
 
 def test_build_cv_docx_renders_both_languages_without_leftover_tags():
@@ -243,11 +287,15 @@ if __name__ == "__main__":
     test_load_candidate_falls_back_to_example_when_missing()
     test_generate_without_llm()
     test_template_letter_body_has_no_dutch_leak_in_english()
+    test_template_letter_body_keeps_role_without_company()
     test_description_up_to_desc_chars_reaches_the_prompt_in_full()
     test_description_beyond_desc_chars_is_capped()
     test_generate_with_fake_llm()
     test_cv_render_context_maps_bullet_bank_by_language()
+    test_bullet_text_does_not_leak_other_language()
+    test_cv_render_context_skips_malformed_entries_instead_of_crashing()
     test_letter_render_context_builds_paragraphs_from_body()
+    test_letter_render_context_falls_back_to_english_for_unknown_lang()
     test_build_cv_docx_renders_both_languages_without_leftover_tags()
     test_build_letter_docx_renders_both_languages_without_leftover_tags()
     print("\nAll generator tests passed.")

@@ -120,6 +120,74 @@ def test_draft_candidate_from_text_rejects_bullet_without_id():
     print("PASS test_draft_candidate_from_text_rejects_bullet_without_id")
 
 
+def test_draft_candidate_from_text_rejects_duplicate_experience_ids():
+    bad = json.loads(FIXTURE_REPLY)
+    bad["experience"].append(dict(bad["experience"][0]))  # same id, duplicated
+
+    try:
+        draft_candidate_from_text(FIXTURE_CV_TEXT, lambda s, u: json.dumps(bad))
+    except CandidateImportError as e:
+        assert "Duplicate id" in str(e) and "examplecorp" in str(e)
+    else:
+        raise AssertionError("expected CandidateImportError")
+    print("PASS test_draft_candidate_from_text_rejects_duplicate_experience_ids")
+
+
+def test_draft_candidate_from_text_rejects_duplicate_bullet_ids():
+    bad = json.loads(FIXTURE_REPLY)
+    bad["experience"][0]["bullets"].append(dict(bad["experience"][0]["bullets"][0]))
+
+    try:
+        draft_candidate_from_text(FIXTURE_CV_TEXT, lambda s, u: json.dumps(bad))
+    except CandidateImportError as e:
+        assert "Duplicate id" in str(e)
+    else:
+        raise AssertionError("expected CandidateImportError")
+    print("PASS test_draft_candidate_from_text_rejects_duplicate_bullet_ids")
+
+
+def test_draft_candidate_from_text_rejects_bullet_with_no_text():
+    bad = json.loads(FIXTURE_REPLY)
+    bad["experience"][0]["bullets"][0]["nl"] = ""
+    bad["experience"][0]["bullets"][0]["en"] = ""
+
+    try:
+        draft_candidate_from_text(FIXTURE_CV_TEXT, lambda s, u: json.dumps(bad))
+    except CandidateImportError as e:
+        assert "no nl or en text" in str(e)
+    else:
+        raise AssertionError("expected CandidateImportError")
+    print("PASS test_draft_candidate_from_text_rejects_bullet_with_no_text")
+
+
+def test_draft_candidate_from_text_rejects_non_list_skills():
+    # A model replying with skills as a bare string (e.g. "Python, SQL")
+    # instead of a list of {name: ...} objects must be caught here, not
+    # crash much later in cv_render_context.
+    bad = json.loads(FIXTURE_REPLY)
+    bad["skills"] = "Python, SQL"
+
+    try:
+        draft_candidate_from_text(FIXTURE_CV_TEXT, lambda s, u: json.dumps(bad))
+    except CandidateImportError as e:
+        assert "skills" in str(e)
+    else:
+        raise AssertionError("expected CandidateImportError")
+    print("PASS test_draft_candidate_from_text_rejects_non_list_skills")
+
+
+def test_write_candidate_draft_refuses_to_overwrite_real_candidate_yaml():
+    from jobtracker.generator import CANDIDATE_PATH
+    data = draft_candidate_from_text(FIXTURE_CV_TEXT, _fixed_caller)
+    try:
+        write_candidate_draft(data, CANDIDATE_PATH)
+    except CandidateImportError as e:
+        assert "Refusing" in str(e)
+    else:
+        raise AssertionError("expected CandidateImportError")
+    print("PASS test_write_candidate_draft_refuses_to_overwrite_real_candidate_yaml")
+
+
 def test_write_candidate_draft_roundtrips_as_yaml():
     tmp = Path(tempfile.mkdtemp(prefix="jt_import_"))
     try:
@@ -171,7 +239,8 @@ def test_cli_exits_nonzero_when_no_backend_available():
 
 
 def test_cli_exits_nonzero_for_missing_input_file():
-    code = import_candidate.main(["/no/such/file.txt"])
+    with patch.object(import_candidate, "load_env", lambda: None):
+        code = import_candidate.main(["/no/such/file.txt"])
     assert code == 2
     print("PASS test_cli_exits_nonzero_for_missing_input_file")
 
@@ -183,6 +252,11 @@ if __name__ == "__main__":
     test_draft_candidate_from_text_rejects_missing_top_level_key()
     test_draft_candidate_from_text_rejects_experience_without_id()
     test_draft_candidate_from_text_rejects_bullet_without_id()
+    test_draft_candidate_from_text_rejects_duplicate_experience_ids()
+    test_draft_candidate_from_text_rejects_duplicate_bullet_ids()
+    test_draft_candidate_from_text_rejects_bullet_with_no_text()
+    test_draft_candidate_from_text_rejects_non_list_skills()
+    test_write_candidate_draft_refuses_to_overwrite_real_candidate_yaml()
     test_write_candidate_draft_roundtrips_as_yaml()
     test_cli_writes_draft_with_mocked_caller()
     test_cli_exits_nonzero_when_no_backend_available()
