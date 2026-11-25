@@ -50,6 +50,16 @@ class ThinContentError(Exception):
         self.raw_html = raw_html
 
 
+class IngestInputError(ValueError):
+    """Raised for a user-input problem that's safe to show verbatim (currently
+    just "neither a URL nor pasted text was given"). Deliberately NOT the base
+    for anything requests.* raises -- several of its exceptions (e.g.
+    MissingSchema for a URL pasted without "https://") also subclass
+    ValueError, and those carry library-internal wording that shouldn't be
+    reflected onto the page; callers should catch THIS type specifically,
+    not bare ValueError, to tell the two apart."""
+
+
 def _title_case_slug(slug: str) -> str:
     return re.sub(r"[-_]+", " ", slug).strip().title() or slug
 
@@ -185,7 +195,9 @@ def _fetch_known_platform(url: str) -> Optional[Tuple[str, Job, str]]:
         if m:
             try:
                 job, raw = detail_fn(m)
-            except (requests.RequestException, ValueError):
+            except (requests.RequestException, ValueError) as e:
+                print(f"  [ingest] {name} detail fetch failed for {url!r} ({e}); "
+                     "falling back to generic fetch")
                 return None
             return name, job, raw
     return None
@@ -224,17 +236,42 @@ def fetch_with_playwright(url: str) -> Optional[str]:
 
 
 _TITLE_SEP_RE = re.compile(r"\s*[|\-–—]\s+")
+_BOILERPLATE_TAIL_RE = re.compile(
+    r"^(careers?|jobs?|vacature(n)?|vacancies|werken\s+bij)\b", re.IGNORECASE)
+# A sitename that is itself just a bare domain (no spaces, dot-separated
+# labels) carries no real signal -- trafilatura falls back to the hostname
+# (stripping a leading "www."/"w1." etc.) when a page has no og:site_name,
+# so comparing against the exact original host misses that case.
+_BARE_DOMAIN_RE = re.compile(r"^[\w-]+(\.[\w-]+)+$")
+# Second-level labels that are themselves a generic suffix, not the company
+# name, for domains like "jobs.ox.ac.uk" or "careers.acme.co.uk" -- not a
+# full public-suffix list, just the common ones relevant to this project's
+# (Dutch/European) target sources.
+_SECOND_LEVEL_SUFFIXES = {"co", "ac", "org", "gov", "edu", "net", "sch"}
 
 
-def _clean_title(raw_title: str) -> str:
+def _clean_title(raw_title: str, company: str = "") -> str:
     """Career-page <title> tags are conventionally "Role Title | Company
-    Careers" or "Role Title - Company"; keep only the role part. A hyphen
-    inside a word (e.g. "Full-Stack") never matches — the separator requires
-    surrounding whitespace."""
+    Careers" or "Role Title - Company"; strip that tail -- but ONLY when it
+    actually looks like boilerplate or repeats the resolved company name.
+    A plain dash/em-dash is common in legitimate titles too (Dutch titles
+    especially: "Senior Onderzoeker — afdeling Genomics"), so an unconditional
+    split would wrongly truncate those. A hyphen inside a word (e.g.
+    "Full-Stack") never matches the separator, which requires surrounding
+    whitespace."""
     if not raw_title:
         return raw_title
-    first = _TITLE_SEP_RE.split(raw_title.strip(), maxsplit=1)[0].strip()
-    return first or raw_title.strip()
+    raw_title = raw_title.strip()
+    parts = _TITLE_SEP_RE.split(raw_title, maxsplit=1)
+    if len(parts) == 1:
+        return raw_title
+    head, tail = parts[0].strip(), parts[1].strip()
+    tail_norm = tail.lower()
+    looks_boilerplate = bool(_BOILERPLATE_TAIL_RE.match(tail_norm))
+    repeats_company = bool(company) and company.lower() in tail_norm
+    if head and (looks_boilerplate or repeats_company):
+        return head
+    return raw_title
 
 
 def _title_from_html(raw_html: str, extracted_text: str) -> str:
@@ -247,12 +284,17 @@ def _title_from_html(raw_html: str, extracted_text: str) -> str:
     return first_line[0][:200] if first_line else "Vacancy"
 
 
+def _looks_like_bare_domain(s: str) -> bool:
+    return bool(s) and " " not in s and bool(_BARE_DOMAIN_RE.match(s))
+
+
 def _company_from_domain(url: str) -> str:
     """Best-effort company guess from the registrable domain when no better
     signal (og:site_name, JSON-LD) is available — e.g. "careers.acme.com" or
-    "acme.io" both -> "Acme". Approximate (doesn't know multi-part public
-    suffixes like .co.uk), good enough as a fallback, never used for a known
-    platform where the real company name/slug is already available."""
+    "acme.io" both -> "Acme", "jobs.ox.ac.uk" -> "Ox". Approximate (not a
+    real public-suffix list, so a bare two-label ccTLD domain like "uu.nl"
+    still yields just "Uu"), good enough as a fallback, never used for a
+    known platform where the real company name/slug is already available."""
     try:
         host = (urlparse(url).hostname or "").lower()
     except ValueError:
@@ -260,19 +302,23 @@ def _company_from_domain(url: str) -> str:
     parts = [p for p in host.split(".") if p]
     if len(parts) < 2:
         return _title_case_slug(host)
+    if len(parts) >= 3 and parts[-2] in _SECOND_LEVEL_SUFFIXES:
+        return _title_case_slug(parts[-3])
     return _title_case_slug(parts[-2])
 
 
 def _title_and_company_from_html(raw_html: str, extracted_text: str, url: str) -> Tuple[str, str]:
     meta = trafilatura.extract_metadata(raw_html, default_url=url) if raw_html else None
     title = (meta.title if meta else "") or _title_from_html(raw_html, extracted_text)
-    # trafilatura's sitename falls back to the bare hostname when the page has no
-    # og:site_name/JSON-LD signal -- in that case the domain heuristic below gives
-    # a nicer result ("Example Institute" vs. "example-institute.org").
+    # trafilatura's sitename falls back to a bare-domain form (stripping a
+    # leading "www."/"w1." etc.) when the page has no og:site_name/JSON-LD
+    # signal -- that form carries no real information, so detect it by
+    # shape (dot-separated labels, no spaces) rather than comparing against
+    # the exact original host, which the www-stripping would dodge.
     sitename = (meta.sitename if meta else "") or ""
-    host = (urlparse(url).hostname or "").lower()
-    company = sitename if sitename and sitename.lower().strip(".") != host else _company_from_domain(url)
-    return _clean_title(title), company
+    company = _company_from_domain(url) if _looks_like_bare_domain(sitename) or not sitename \
+        else sitename
+    return _clean_title(title, company), company
 
 
 def _job_from_text(url: str, title: str, company: str, description: str, source: str) -> Job:
@@ -298,12 +344,16 @@ def ingest_url(url: str, paste_text: Optional[str] = None, snapshot_store=None) 
     url = (url or "").strip()
     paste_text = (paste_text or "").strip()
     if not url and not paste_text:
-        raise ValueError("A vacancy URL or pasted text is required.")
+        raise IngestInputError("A vacancy URL or pasted text is required.")
     store = snapshot_store if snapshot_store is not None else make_snapshot_store()
 
     if paste_text:
-        job = _job_from_text(url or "pasted-text", _title_from_html("", paste_text), "",
-                             paste_text, "Pasted")
+        # A URL is usually given alongside the paste (the error page that asks
+        # for pasted text preserves it), so a domain-derived company is
+        # normally available even though the text itself wasn't fetched.
+        company = _company_from_domain(url) if url else ""
+        title = _clean_title(_title_from_html("", paste_text), company)
+        job = _job_from_text(url or "pasted-text", title, company, paste_text, "Pasted")
         store.save(url or job.job_id, job_id=job.job_id, platform="paste",
                   raw_source="", extracted_text=paste_text)
         return job.to_record()
