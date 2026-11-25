@@ -33,6 +33,11 @@ python -m tests.test_new_adapters
 python -m tests.test_example_configs
 python -m tests.test_werkenvoornederland
 python -m tests.test_generator
+python -m tests.test_tailor
+python -m tests.test_generation_schema
+python -m tests.test_generation
+python -m tests.test_generation_records
+python -m tests.test_ingest
 python -m tests.test_webapp
 ```
 
@@ -112,8 +117,12 @@ render time), so they're tracked in the repo and ship with a minimal
 placeholder design. Swap in your own Word design by replacing these files
 with the same Jinja tags; no code change is needed. The exact tags each
 template expects are defined by `jobtracker/generator.py`'s
-`cv_render_context`/`letter_render_context` (the data passed to the
-template at render time).
+`cv_render_context_from_tailor_result`/`letter_render_context` (the data
+the live generation path actually passes to the template at render time).
+`cv_render_context` builds the same keys from the full, unfiltered
+candidate.yaml instead of a `TailorResult`'s selection — no longer called
+by the live path, but kept as that full-dump reference and exercised by
+its own tests.
 
 The four placeholder `.docx` files are generated, not hand-edited —
 `build_templates.py` is the single source for their content. Regenerate
@@ -133,21 +142,25 @@ python import_candidate.py my_cv.txt --out config/candidate.draft.yaml
 ```
 
 Converts a plain-text export of your CV into a `candidate.yaml`-shaped draft
-via the LLM backend configured for generation (`GENERATOR_BACKEND`). The
+via the LLM backend selected by `GENERATOR_BACKEND` (default `ollama`; this
+is the only thing that variable still affects — CV/letter generation itself
+always goes through the Claude API pipeline below). The
 output is for **manual review only** — read it, correct anything wrong or
 missing, then rename/copy it to `config/candidate.yaml` yourself; the script
 never writes there directly. After that one-time bootstrap, `candidate.yaml`
 is the single source of facts.
 
-### Analyse + tailor pipeline (backend module)
+### Analyse + tailor pipeline
 
-`jobtracker/tailor.py` will eventually replace the single "write a profile
-paragraph" call with a two-step pipeline. It uses the official `anthropic`
+The "Genereer CV + brief" button runs a two-step Claude API pipeline
+(`jobtracker/tailor.py`), orchestrated by `jobtracker/generation.py`, instead
+of writing a single free-text paragraph. It uses the official `anthropic`
 SDK's structured outputs, so a *complete* reply always parses into the
 schema defined in `jobtracker/generation_schema.py`. Truncation and the
 SDK's own exceptions (authentication errors, rate limits, refusals) can
-still occur -- see `GenerationTruncatedError` and
-`GenerationUnavailableError` in `tailor.py`.
+still occur — see `GenerationTruncatedError` and
+`GenerationUnavailableError` in `tailor.py` — and are handled by the JSON
+handoff described below, never by silently rendering a generic document.
 
 1. **Analyse** (Haiku, `ANTHROPIC_MODEL_EXTRACT`) extracts the vacancy's
    requirements, keywords, language, contact, deadline, and any application
@@ -163,20 +176,47 @@ A pure-code validator (`generation_schema.validate_tailor_result`) then
 checks every bullet, role, skill, and requirement-evidence id against
 `candidate.yaml`, and treats a reply truncated at `max_tokens` as a failed
 generation. These are blocking checks: a failure here means the result must
-not be rendered. A second, non-blocking check (`ground_tailor_result`) flags
--- without blocking on -- word counts outside the prompt's target range, an
-explicit "N years of experience" claim, and a number, year, or capitalized
-word in the free text that does not appear anywhere in `candidate.yaml`'s
-facts. This catches cases where the model invents something despite the
-"never invent facts" instruction. Each analyse/tailor call is recorded
-(model id, token usage, stop reason, raw response) via
-`jobtracker/generation_records.py`, keyed by job, for later cost and
-failure auditing.
+not be rendered. If the first tailor reply fails this check, `tailor.py`
+retries once with the specific validation errors appended to the prompt
+before giving up. A second, non-blocking check (`ground_tailor_result`) exists for the same
+purpose without blocking on it — word counts outside the prompt's target
+range, an explicit "N years of experience" claim, and a number, year, or
+capitalized word in the free text that does not appear anywhere in
+`candidate.yaml`'s facts, catching cases where the model invents something
+despite the "never invent facts" instruction — but **no caller invokes it
+yet**: its warnings are not currently computed or shown anywhere. Wiring it
+into a review page is tracked under "Generation review page" in the
+Roadmap below (issue #12).
 
-This module is unit-tested against a mocked SDK client — no live Claude API
-call is made in tests. **It isn't wired into the web UI yet**: rendering a
-`TailorResult` into the CV/letter templates, and a review page for editing
-the result before rendering, are tracked separately.
+**JSON handoff on failure.** If the pipeline cannot produce a usable result
+— no `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` configured, the account has
+no API credit left, the reply is truncated, or it still fails validation
+after the one retry — job-tracker never falls back to a generic template.
+Instead it writes `applications/<Company>_<Title>/request.json` (the
+vacancy, the analysis if that step already succeeded, the candidate's facts,
+the exact system prompts, and the `TailorResult` JSON schema) and sets the
+job's status to **"Wacht op generatie"** ("awaiting generation"), which also
+appears as a selectable status on the job board. From there:
+
+1. Download `request.json` from the job row (web UI) or the `/ingest` page
+   (for a URL/paste-ingested job).
+2. Run `/tailor <job_id>` in a Claude Code session opened on this repository
+   (`.claude/commands/tailor.md`) — it reads `request.json`, reproduces the
+   analyse/tailor steps itself, and writes `generation.json` next to it —
+   or paste `request.json`'s contents into claude.ai by hand and save its
+   reply as `generation.json` in the same way.
+3. Upload `generation.json` from the job row. It goes through the *exact
+   same* `validate_tailor_result` check a live reply would: an id that does
+   not exist in `candidate.yaml` is rejected with a clear error and nothing
+   is rendered, rather than silently passing through.
+
+This module is unit-tested (`tests/test_tailor.py`, `tests/test_generation.py`)
+against a mocked SDK client and against hand-built `TailorResult`/upload
+payloads — no live Claude API call is made in tests.
+
+A `generation_records` store (`jobtracker/generation_records.py`) exists for
+per-call token-usage/stop-reason auditing, but no caller populates it yet —
+a known gap, likely to be closed alongside cost tracking (issue #13).
 
 ### Generating from a bare URL
 
@@ -339,17 +379,21 @@ The compose file defaults to `qwen2.5:3b`; override with `OLLAMA_MODEL` in
 (`python run_web.py` on the host), the default `http://localhost:11434`
 reaches the same instance directly.
 
-Scoring and CV/letter generation each select their backend independently, through
-two separate environment variables: `LLM_BACKEND` controls scoring, and
-`GENERATOR_BACKEND` controls generation. Both default to `ollama`, so setting one
-of them to `anthropic` does not change the other. Set either variable to
-`anthropic`, and set `ANTHROPIC_API_KEY`, to use the hosted option for that part
-of the pipeline. Generation needs long, complete replies, so it uses a separate
-model and a separate token budget from scoring's short JSON replies:
-`ANTHROPIC_MODEL_EXTRACT` (default `claude-haiku-4-5-20251001`) for scoring, and
-`ANTHROPIC_MODEL_WRITE` (default `claude-sonnet-5`) for generation. A reply
-that gets cut off by the token limit is treated as a failed generation, not
-returned to the caller truncated.
+Scoring and CV/letter generation use the Claude API independently of each
+other. Scoring selects its backend through `LLM_BACKEND` (default `ollama`;
+set it to `anthropic`, and set `ANTHROPIC_API_KEY`, to score with Haiku
+instead of a local model). CV/letter generation has no local-model option to
+select: it always runs the two-step Claude API pipeline described in
+"Analyse + tailor pipeline" above — analyse (Haiku, `ANTHROPIC_MODEL_EXTRACT`,
+default `claude-haiku-4-5-20251001`) and tailor (Sonnet,
+`ANTHROPIC_MODEL_WRITE`, default `claude-sonnet-5`). Without
+`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` configured, or on any unrecovered
+API failure, generation writes the JSON handoff described above instead of
+falling back to a local model. `GENERATOR_BACKEND` only affects the one-time
+`import_candidate.py` import helper (see "One-time import helper" above),
+not CV/letter generation itself. A reply that gets cut off by the token
+limit is treated as a failed generation, not returned to the caller
+truncated.
 
 Scoring is **persona-based**: `config/profile.yaml` defines your career paths
 (personas) — e.g. Bioinformatics, .NET Developer, Cloud/DevOps, Data Engineer.
@@ -423,17 +467,22 @@ config/profile.yaml ───┘       ▲                                      
 - `jobtracker/adapters.py` — one function per platform; returns `list[Job]`.
 - `jobtracker/filters.py` — rule filter incl. salary setpoint.
 - `jobtracker/scorer.py` — LLM fit-scoring (local Ollama, or Anthropic).
-- `jobtracker/generator.py` — CV + motivation letter generation: builds the
-  facts/render context from `candidate.yaml` and renders it into the
-  `config/templates/*.docx` layouts via docxtpl.
+- `jobtracker/generator.py` — the facts-loading, render-context, and
+  `.docx`-writing pieces of CV + motivation letter generation: builds the
+  render context from `candidate.yaml` and a `TailorResult`, and renders it
+  into the `config/templates/*.docx` layouts via docxtpl.
 - `jobtracker/candidate_import.py` — one-time CV-text → `candidate.yaml`-shaped
   draft, used by `import_candidate.py`.
 - `jobtracker/generation_schema.py` — shared Pydantic models (`AnalysisResult`,
   `TailorResult`) and the pure-code validator for the analyse/tailor pipeline
-  below; shared by the live API path and the future JSON-handoff path (#11).
+  below; shared by the live API path and the JSON-handoff path.
 - `jobtracker/tailor.py` — the analyse (Haiku) and tailor (Sonnet) Claude API
   calls, using the official SDK's structured outputs so a reply always
-  parses into the schema above.
+  parses into the schema above; also builds the JSON-handoff request content.
+- `jobtracker/generation.py` — orchestrates `tailor.py` and `generator.py`
+  for one job: runs the analyse/tailor pipeline and renders the result, or
+  on any unrecovered failure writes the `request.json` handoff and flips the
+  job's status. The only generation entry point `jobtracker/webapp.py` calls.
 - `jobtracker/generation_records.py` — `generation_records` storage (model
   id, token usage, stop_reason, raw response) per analyse/tailor call.
 - `jobtracker/ingest.py` — generate from a bare URL/pasted text: known-platform
@@ -462,8 +511,9 @@ config/profile.yaml ───┘       ▲                                      
 - [x] Daily scheduled scrape (in the web app)
 - [x] Generate a CV + brief from a bare vacancy URL or pasted text
 - [x] docxtpl CV/letter templates + candidate.yaml bullet bank
-- [x] Analyse + tailor Claude API pipeline (backend module; not yet wired
-      into the web UI -- that's the review page below)
+- [x] Analyse + tailor Claude API pipeline, wired into the web UI
+- [x] JSON handoff (request.json/generation.json) when the Claude API call
+      fails, replacing the old silent template fallback
 - [ ] Generation review page: requirement map, edit, regenerate, render
 - [ ] E-mail/Slack digest of new high-score matches
 - [ ] Playwright-based adapter for JS-rendered career sites

@@ -182,7 +182,7 @@ cython_debug/
 
 
 Solliciteren/
-Applications/
+applications/
 data/
 config/*
 !config/*.example.yaml

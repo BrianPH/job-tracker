@@ -8,23 +8,29 @@ Features
 - Setpoints page (/settings): edit keywords, excludes, locations, minimum salary,
   remote rule and the daily scrape hour — written back to config/profile.yaml.
 - "Scrape nu" button: runs the pipeline in a background thread, live log shown.
-- Per-job "Genereer CV + brief": builds tailored .docx documents (generator.py)
-  in a background thread; download links appear on the job row.
+- Per-job "Genereer CV + brief": runs the analyse/tailor Claude API pipeline
+  (jobtracker/generation.py) in a background thread; download links appear on
+  the job row. On any unrecovered failure the job gets a JSON handoff instead
+  (issue #11/M3b): download request.json, run `.claude/commands/tailor.md` or
+  paste it into claude.ai, upload the resulting generation.json.
 - APScheduler: runs the pipeline automatically once a day (hour configurable).
 """
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlencode
 
 import yaml
-from fastapi import BackgroundTasks, FastAPI, Form, Request
+from fastapi import BackgroundTasks, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from .generator import OUTPUT_DIR, generate_application
+from . import generation
+from . import generator
+from .generator import OUTPUT_DIR
 from .ingest import IngestInputError, ThinContentError, ingest_url
 from .pipeline import ROOT, load_env, load_profile, run_pipeline
 from .storage import make_store
@@ -32,11 +38,13 @@ from .storage import make_store
 app = FastAPI(title="job-tracker")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
-STATUSES = ["New", "Reviewing", "Applied", "Rejected"]
+STATUSES = ["New", "Reviewing", "Applied", "Rejected", generation.HANDOFF_STATUS]
 
 # --- in-memory state (single local user) ------------------------------------ #
 SCRAPE = {"running": False, "log": [], "last_summary": None}
-GENERATION = {}  # job_id -> {"state": "running"|"done"|"error", "files": [...], "error": str}
+# job_id -> {"state": "running"|"done"|"handoff"|"error", "files": [...], "error": str,
+#            "request_path": str (handoff only)}
+GENERATION = {}
 ADHOC_JOBS = {}  # job_id -> job dict, for jobs ingested from a URL/paste (not in the DB)
 _LOCK = threading.Lock()
 
@@ -67,6 +75,44 @@ def start_scrape(rescore: bool = False) -> bool:
     return True
 
 
+# --- handoff recovery (survives a restart; GENERATION does not) -------------- #
+def _handoff_view(job: Optional[dict]) -> Optional[dict]:
+    """Reconstructs a GENERATION-shaped "handoff" entry from the job's
+    persisted status and request.json on disk. GENERATION is purely
+    in-memory and empty again after a restart, but the job's status
+    ("Wacht op generatie") and request.json both survive one -- without
+    this, the download/upload UI would silently disappear on restart even
+    though the job is still, correctly, waiting on a human (see deploy.yml,
+    which restarts the container on every push)."""
+    if job is None or job.get("status") != generation.HANDOFF_STATUS:
+        return None
+    candidate = generator.load_candidate()
+    lang = generator.detect_language(f"{job.get('title','')} {job.get('description','')}")
+    path = generator.application_paths(job, candidate, lang, OUTPUT_DIR)[0].parent / "request.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    return {"state": "handoff", "error": payload.get("error", ""),
+           "request_path": str(path), "files": []}
+
+
+def _generation_view(jobs: list) -> dict:
+    """GENERATION, with a synthesized handoff entry added for any job whose
+    status says it's waiting on a human but has no (fresher) in-memory
+    entry -- e.g. right after a restart."""
+    view = dict(GENERATION)
+    for job in jobs:
+        job_id = job.get("job_id")
+        if job_id and job_id not in view:
+            synthesized = _handoff_view(job)
+            if synthesized is not None:
+                view[job_id] = synthesized
+    return view
+
+
 # --- routes ------------------------------------------------------------------ #
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, status: str = "", company: str = "", source: str = "",
@@ -92,7 +138,7 @@ def index(request: Request, status: str = "", company: str = "", source: str = "
         "jobs": jobs, "statuses": STATUSES, "sources": sources,
         "flt": {"status": status, "company": company, "source": source,
                 "q": q, "min_score": min_score, "remote": remote},
-        "scrape": SCRAPE, "generation": GENERATION,
+        "scrape": SCRAPE, "generation": _generation_view(jobs),
     })
 
 
@@ -133,27 +179,98 @@ def scrape_log():
 
 
 # --- CV / letter generation --------------------------------------------------- #
+def _set_status_fn(job_id: str) -> Callable[[str], None]:
+    """ADHOC_JOBS (ingested from a URL/paste) aren't rows in the real store --
+    their status lives only in that in-memory dict, so a handoff/upload on
+    one of them must update it there instead of calling store.update_status
+    (which would silently no-op: no row with that job_id exists)."""
+    if job_id in ADHOC_JOBS:
+        def _set(status: str) -> None:
+            ADHOC_JOBS[job_id]["status"] = status
+        return _set
+
+    def _set(status: str) -> None:
+        _store().update_status(job_id, status)
+    return _set
+
+
+def _redirect_target(job_id: str) -> str:
+    return f"/ingest?job_id={job_id}" if job_id in ADHOC_JOBS else "/"
+
+
 def _generate_worker(job_id: str, job: dict):
     try:
-        result = generate_application(job)
-        rel = [str(p.relative_to(OUTPUT_DIR)).replace("\\", "/") for p in
-               (result["cv"], result["letter"])]
-        GENERATION[job_id] = {"state": "done", "files": rel,
-                              "llm_used": result["llm_used"], "lang": result["lang"]}
+        result = generation.generate_or_handoff(job, out_dir=OUTPUT_DIR,
+                                                set_status=_set_status_fn(job_id))
     except Exception as e:  # noqa: BLE001
         GENERATION[job_id] = {"state": "error", "error": str(e), "files": []}
+        return
+    if result["state"] == "handoff":
+        GENERATION[job_id] = {"state": "handoff", "error": result["error"],
+                              "request_path": str(result["request_path"]), "files": []}
+    else:
+        rel = [str(p.relative_to(OUTPUT_DIR)).replace("\\", "/") for p in
+               (result["cv"], result["letter"])]
+        GENERATION[job_id] = {"state": "done", "files": rel, "lang": result["lang"]}
+
+
+def _get_job(job_id: str) -> Optional[dict]:
+    return _store().get(job_id) or ADHOC_JOBS.get(job_id)
 
 
 @app.post("/jobs/{job_id}/generate")
 def generate(job_id: str, background_tasks: BackgroundTasks):
-    job = _store().get(job_id)
+    job = _get_job(job_id)
     if job is None:
         return RedirectResponse("/", status_code=303)
     current = GENERATION.get(job_id, {})
     if current.get("state") != "running":
         GENERATION[job_id] = {"state": "running", "files": []}
         background_tasks.add_task(_generate_worker, job_id, job)
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse(_redirect_target(job_id), status_code=303)
+
+
+@app.get("/jobs/{job_id}/request.json")
+def download_request_json(job_id: str):
+    gen = GENERATION.get(job_id) or {}
+    path_str = gen.get("request_path") if gen.get("state") == "handoff" else None
+    if not path_str:
+        synthesized = _handoff_view(_get_job(job_id))
+        path_str = synthesized.get("request_path") if synthesized else None
+    if not path_str:
+        return HTMLResponse("Not found", status_code=404)
+    path = Path(path_str)
+    if not path.is_file():
+        return HTMLResponse("Not found", status_code=404)
+    return FileResponse(str(path), filename="request.json")
+
+
+@app.post("/jobs/{job_id}/generation-upload")
+async def generation_upload(job_id: str, generation_file: UploadFile = File(...)):
+    job = _get_job(job_id)
+    if job is None:
+        return RedirectResponse("/", status_code=303)
+
+    raw = await generation_file.read()
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        current = GENERATION.get(job_id, {})
+        GENERATION[job_id] = {**current, "state": "handoff",
+                              "error": "Uploaded file is not valid JSON."}
+        return RedirectResponse(_redirect_target(job_id), status_code=303)
+
+    result = generation.apply_handoff_upload(job, data, out_dir=OUTPUT_DIR,
+                                             set_status=_set_status_fn(job_id))
+    if result["state"] == "invalid":
+        current = GENERATION.get(job_id, {})
+        GENERATION[job_id] = {**current, "state": "handoff",
+                              "error": "; ".join(result["errors"])}
+    else:
+        rel = [str(p.relative_to(OUTPUT_DIR)).replace("\\", "/") for p in
+               (result["cv"], result["letter"])]
+        GENERATION[job_id] = {"state": "done", "files": rel, "lang": result["lang"]}
+    return RedirectResponse(_redirect_target(job_id), status_code=303)
 
 
 # --- generate from a bare URL / pasted text ----------------------------------- #
@@ -161,7 +278,8 @@ def generate(job_id: str, background_tasks: BackgroundTasks):
 def ingest_form(request: Request, job_id: str = ""):
     job = ADHOC_JOBS.get(job_id) if job_id else None
     return templates.TemplateResponse(request, "ingest.html", {
-        "job": job, "job_id": job_id, "generation": GENERATION, "error": "", "url": "",
+        "job": job, "job_id": job_id, "generation": _generation_view([job] if job else []),
+        "error": "", "url": "",
     })
 
 
