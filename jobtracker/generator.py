@@ -34,7 +34,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATE_PATH = ROOT / "config" / "candidate.yaml"
-PROFILE_PATH = ROOT / "config" / "profile.yaml"
 EXAMPLES_DIR = ROOT / "Solliciteren"
 OUTPUT_DIR = ROOT / "applications"
 TEMPLATES_DIR = ROOT / "config" / "templates"
@@ -76,12 +75,6 @@ def _bullet_text(bullet: dict, lang: str) -> str:
     English CV, so a bullet missing the requested language is dropped
     instead rather than substituted."""
     return bullet.get(lang, "")
-
-
-def load_profile(path: Path = PROFILE_PATH) -> dict:
-    if not path.exists():
-        path = ROOT / "config" / "profile.example.yaml"
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
 def detect_language(text: str) -> str:
