@@ -63,12 +63,13 @@ def test_validate_rejects_unknown_skill():
     print("PASS test_validate_rejects_unknown_skill")
 
 
-def test_validate_rejects_bad_word_counts():
+def test_validate_ignores_bad_word_counts():
+    # Word counts are a style nit, not an id/shape error -- validate_* no
+    # longer blocks on them (ground_tailor_result warns instead).
     result = _valid_result(profile="Too short.", letter_paragraphs=["Also too short."])
     errors = validate_tailor_result(result, CANDIDATE)
-    assert any("profile is" in e for e in errors)
-    assert any("letter_paragraphs total" in e for e in errors)
-    print("PASS test_validate_rejects_bad_word_counts")
+    assert not any("word" in e for e in errors)
+    print("PASS test_validate_ignores_bad_word_counts")
 
 
 def test_validate_rejects_empty_letter():
@@ -84,13 +85,43 @@ def test_validate_treats_max_tokens_stop_reason_as_blocking():
     print("PASS test_validate_treats_max_tokens_stop_reason_as_blocking")
 
 
-def test_validate_rejects_bad_requirement_map_status():
+def test_requirement_map_status_is_a_pydantic_literal():
+    # status is now Literal["met", "partial", "gap"] -- an invalid value
+    # can't be constructed at all, so structured outputs can't emit one
+    # either. This replaces the old post-hoc string check in validate_*.
+    from pydantic import ValidationError
+
+    from jobtracker.generation_schema import RequirementMapEntry
+    try:
+        RequirementMapEntry(requirement="Python", status="maybe")
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("expected a ValidationError for an invalid status")
+    print("PASS test_requirement_map_status_is_a_pydantic_literal")
+
+
+def test_validate_rejects_unknown_requirement_map_evidence():
     from jobtracker.generation_schema import RequirementMapEntry
     result = _valid_result()
-    result.requirement_map = [RequirementMapEntry(requirement="Python", status="maybe")]
+    result.requirement_map = [
+        RequirementMapEntry(requirement="Python", evidence=["no-such-id"], status="met")
+    ]
     errors = validate_tailor_result(result, CANDIDATE)
-    assert any("status must be met/partial/gap" in e for e in errors)
-    print("PASS test_validate_rejects_bad_requirement_map_status")
+    assert any("no-such-id" in e for e in errors)
+    print("PASS test_validate_rejects_unknown_requirement_map_evidence")
+
+
+def test_validate_accepts_requirement_map_evidence_bullet_or_skill():
+    from jobtracker.generation_schema import RequirementMapEntry
+    result = _valid_result()
+    result.requirement_map = [
+        RequirementMapEntry(requirement="Python", evidence=["examplecorp-pipelines", "Python"],
+                            status="met")
+    ]
+    errors = validate_tailor_result(result, CANDIDATE)
+    assert errors == []
+    print("PASS test_validate_accepts_requirement_map_evidence_bullet_or_skill")
 
 
 # --------------------------------------------------------------------------- #
@@ -108,9 +139,17 @@ def test_ground_flags_invented_employer_and_year():
 
 
 def test_ground_does_not_flag_real_facts():
+    # Realistic sentence-initial connectors (not just short pronouns like
+    # "I"/"My", which happen to be too short for _FACT_TOKEN_RE to match at
+    # all and would hide a stoplist gap) plus facts beyond experience/skills
+    # (languages, address) that _facts_word_set must also cover.
     result = _valid_result(
-        profile="I worked at Example Corp with Python and SQL. " * 5,
-        letter_paragraphs=["My time at Example Corp and Acme Software was great. " * 10],
+        profile="Having worked at Example Corp with Python and SQL, I bring relevant "
+                "experience. " * 4,
+        letter_paragraphs=[
+            "During my time at Example Corp and Acme Software, I used Python daily. "
+            "Additionally, I am a native Dutch speaker based in Utrecht. " * 11
+        ],
     )
     warnings = ground_tailor_result(result, CANDIDATE)
     assert warnings == []
@@ -125,6 +164,49 @@ def test_ground_ignores_common_structural_words():
     warnings = ground_tailor_result(result, CANDIDATE)
     assert not any("Dear" in w or "Sincerely" in w for w in warnings)
     print("PASS test_ground_ignores_common_structural_words")
+
+
+def test_ground_does_not_mask_invented_fact_via_substring():
+    # "Ontwikkel" (invented company) must not be hidden by "Ontwikkelde"
+    # (a real word in a bullet) -- facts are matched as whole words, not
+    # via substring containment.
+    result = _valid_result(
+        profile="A tailored profile paragraph. " * 10,
+        letter_paragraphs=["Ik werkte bij Ontwikkel BV aan diverse projecten. " * 10],
+    )
+    warnings = ground_tailor_result(result, CANDIDATE)
+    assert any("Ontwikkel" in w for w in warnings)
+    print("PASS test_ground_does_not_mask_invented_fact_via_substring")
+
+
+def test_ground_flags_invented_years_of_experience():
+    result = _valid_result(
+        profile="A tailored profile paragraph. " * 10,
+        letter_paragraphs=["I bring five years of experience and have 7 jaar ervaring. " * 8],
+    )
+    warnings = ground_tailor_result(result, CANDIDATE)
+    assert any("7 jaar" in w for w in warnings)
+    print("PASS test_ground_flags_invented_years_of_experience")
+
+
+def test_ground_warns_on_bad_word_counts():
+    result = _valid_result(profile="Too short.", letter_paragraphs=["Also too short."])
+    warnings = ground_tailor_result(result, CANDIDATE)
+    assert any("profile is" in w for w in warnings)
+    assert any("letter_paragraphs total" in w for w in warnings)
+    print("PASS test_ground_warns_on_bad_word_counts")
+
+
+def test_ground_extra_allowed_terms_suppresses_employer_name():
+    result = _valid_result(
+        profile="A tailored profile paragraph. " * 10,
+        letter_paragraphs=["I am excited to join Initech as my next step. " * 10],
+    )
+    warnings_without = ground_tailor_result(result, CANDIDATE)
+    assert any("Initech" in w for w in warnings_without)
+    warnings_with = ground_tailor_result(result, CANDIDATE, extra_allowed_terms=["Initech"])
+    assert not any("Initech" in w for w in warnings_with)
+    print("PASS test_ground_extra_allowed_terms_suppresses_employer_name")
 
 
 # --------------------------------------------------------------------------- #
@@ -144,12 +226,18 @@ if __name__ == "__main__":
     test_validate_rejects_unknown_bullet_id()
     test_validate_rejects_bullet_id_from_wrong_role()
     test_validate_rejects_unknown_skill()
-    test_validate_rejects_bad_word_counts()
+    test_validate_ignores_bad_word_counts()
     test_validate_rejects_empty_letter()
     test_validate_treats_max_tokens_stop_reason_as_blocking()
-    test_validate_rejects_bad_requirement_map_status()
+    test_requirement_map_status_is_a_pydantic_literal()
+    test_validate_rejects_unknown_requirement_map_evidence()
+    test_validate_accepts_requirement_map_evidence_bullet_or_skill()
     test_ground_flags_invented_employer_and_year()
     test_ground_does_not_flag_real_facts()
     test_ground_ignores_common_structural_words()
+    test_ground_does_not_mask_invented_fact_via_substring()
+    test_ground_flags_invented_years_of_experience()
+    test_ground_warns_on_bad_word_counts()
+    test_ground_extra_allowed_terms_suppresses_employer_name()
     test_analysis_result_defaults()
     print("\nAll generation_schema tests passed.")

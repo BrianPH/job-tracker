@@ -15,7 +15,7 @@ Pipeline:
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -34,7 +34,7 @@ class ApplicationRequirements(BaseModel):
 
 
 class AnalysisResult(BaseModel):
-    language: str  # "nl" | "en"
+    language: Literal["nl", "en"]
     requirements: List[str] = Field(default_factory=list)
     keywords: List[str] = Field(default_factory=list)
     contact: str = ""
@@ -51,12 +51,12 @@ class RequirementMapEntry(BaseModel):
     page so the candidate can see what the vacancy asks for that the CV
     doesn't cover."""
     requirement: str
-    evidence: List[str] = Field(default_factory=list)  # bullet/fact ids
-    status: str = "gap"  # "met" | "partial" | "gap"
+    evidence: List[str] = Field(default_factory=list)  # bullet id or skill name
+    status: Literal["met", "partial", "gap"] = "gap"
 
 
 class TailorResult(BaseModel):
-    language: str  # "nl" | "en"
+    language: Literal["nl", "en"]
     profile: str  # 55-85 word CV profile paragraph
     experience_order: List[str] = Field(default_factory=list)  # role ids
     bullets: Dict[str, List[str]] = Field(default_factory=dict)  # role id -> [bullet id]
@@ -97,15 +97,19 @@ def _candidate_ids(candidate: dict) -> tuple:
 def validate_tailor_result(result: TailorResult, candidate: dict,
                            stop_reason: Optional[str] = None) -> List[str]:
     """Blocking errors: a non-empty return means the result must NOT be
-    rendered. Checks every id against candidate.yaml, word counts, and the
-    stop reason -- never the free-text content itself (that's `ground_*`,
-    below, which only warns)."""
+    rendered. Checks every id against candidate.yaml and the stop reason --
+    never free-text style/length (that's `ground_*`, below, which only warns;
+    a 101-word profile isn't a reason to discard an otherwise-correct, paid
+    generation). `status` is no longer checked here -- it's a Pydantic
+    Literal now, so the API/handoff JSON can't carry a bad value in the
+    first place."""
     errors: List[str] = []
 
     if stop_reason == "max_tokens":
         errors.append("Reply was truncated at max_tokens -- treat as a failed generation.")
 
     role_ids, bullets_by_role, skill_names = _candidate_ids(candidate)
+    all_bullet_ids = {bid for ids in bullets_by_role.values() for bid in ids}
 
     for role_id in result.experience_order:
         if role_id not in role_ids:
@@ -125,19 +129,11 @@ def validate_tailor_result(result: TailorResult, candidate: dict,
             errors.append(f"skills references unknown skill {skill!r}.")
 
     for i, entry in enumerate(result.requirement_map):
-        if entry.status not in ("met", "partial", "gap"):
-            errors.append(f"requirement_map[{i}].status must be met/partial/gap, "
-                          f"got {entry.status!r}.")
+        for evidence_id in entry.evidence:
+            if evidence_id not in all_bullet_ids and evidence_id not in skill_names:
+                errors.append(
+                    f"requirement_map[{i}].evidence references unknown id {evidence_id!r}.")
 
-    wc = _word_count(result.profile)
-    if not (PROFILE_WORD_RANGE[0] <= wc <= PROFILE_WORD_RANGE[1]):
-        errors.append(f"profile is {wc} words, expected roughly "
-                      f"{PROFILE_WORD_RANGE[0]}-{PROFILE_WORD_RANGE[1]}.")
-
-    letter_wc = sum(_word_count(p) for p in result.letter_paragraphs)
-    if not (LETTER_WORD_RANGE[0] <= letter_wc <= LETTER_WORD_RANGE[1]):
-        errors.append(f"letter_paragraphs total {letter_wc} words, expected roughly "
-                      f"{LETTER_WORD_RANGE[0]}-{LETTER_WORD_RANGE[1]}.")
     if not result.letter_paragraphs:
         errors.append("letter_paragraphs is empty.")
 
@@ -145,14 +141,21 @@ def validate_tailor_result(result: TailorResult, candidate: dict,
 
 
 _FACT_TOKEN_RE = re.compile(r"\b\d{4}\b|\b[A-Z][a-zA-Z]{2,}\b")
-# Common structural/salutation words that are capitalized for reasons that
-# have nothing to do with being a fact (sentence-initial, greeting, etc.) --
-# excluded to keep this check's noise down. Not exhaustive; it only needs to
-# cut the most common false positives since this is advisory, not a blocker.
+# A claimed "N years/jaar of experience" is exactly what TAILOR_SYSTEM forbids
+# inventing, and it's a lowercase phrase that _FACT_TOKEN_RE's capitalized-word
+# check can't see at all -- checked unconditionally, regardless of facts_blob.
+_YEARS_CLAIM_RE = re.compile(r"\b\d+\+?\s*(years?|yrs?|jaar)\b", re.IGNORECASE)
+# Common structural/salutation/connector words that are capitalized for
+# reasons that have nothing to do with being a fact (sentence-initial,
+# greeting, etc.) -- excluded to keep this check's noise down. Not
+# exhaustive; it only needs to cut the most common false positives since
+# this is advisory, not a blocker.
 _COMMON_CAPITALIZED_WORDS = {
     "the", "this", "that", "these", "those", "with", "and", "for", "your",
     "dear", "sincerely", "regards", "geachte", "graag", "met", "vriendelijke",
     "groet", "mijn", "mevrouw", "heer", "team", "best", "hello", "hi",
+    "having", "working", "during", "after", "through", "additionally",
+    "daarnaast", "verder", "tijdens", "hierdoor", "bovendien", "tevens",
     "january", "february", "march", "april", "may", "june", "july", "august",
     "september", "october", "november", "december",
     "januari", "februari", "maart", "mei", "juni", "juli", "augustus",
@@ -161,16 +164,15 @@ _COMMON_CAPITALIZED_WORDS = {
 }
 
 
-def _facts_text_blob(candidate: dict) -> str:
-    """Flatten every true fact (names, employers, degrees, years, skills)
-    into one lowercase blob to check free text against. Deliberately
-    permissive -- this is a WARNING check, not a blocker, so false positives
-    (a common English word that happens to be capitalized) are an acceptable
-    cost for never silently approving an invented fact."""
+def _facts_word_set(candidate: dict) -> set:
+    """Every true fact (names, address, employers, degrees, years, skills,
+    languages) as a set of individual lowercase words -- word-level, not a
+    blob to substring-match against, so an invented "Ontwikkel BV" isn't
+    masked by an unrelated bullet containing "Ontwikkelde"."""
     parts = []
     p = candidate.get("personal", {})
     if isinstance(p, dict):
-        parts.append(p.get("name", ""))
+        parts.extend([p.get(k, "") for k in ("name", "address", "email")])
     for role in candidate.get("experience", []) or []:
         if not isinstance(role, dict):
             continue
@@ -190,27 +192,59 @@ def _facts_text_blob(candidate: dict) -> str:
     for skill in candidate.get("skills", []) or []:
         if isinstance(skill, dict):
             parts.append(skill.get("name", ""))
+    for lang in candidate.get("languages", []) or []:
+        if isinstance(lang, dict):
+            parts.extend([lang.get(k, "") for k in ("name", "name_en", "level", "level_en")])
     parts.extend(candidate.get("highlights", []) or [])
-    return " ".join(str(p) for p in parts).lower()
+    blob = " ".join(str(p) for p in parts).lower()
+    return set(re.findall(r"[a-z0-9]+", blob))
 
 
-def ground_tailor_result(result: TailorResult, candidate: dict) -> List[str]:
-    """Non-blocking warnings: a 4-digit year or a capitalized word/phrase in
-    the free text (profile + letter) that doesn't appear anywhere in
-    candidate.yaml's facts. Shown on the review page, never blocks
-    rendering -- the LLM is instructed not to invent facts, but this is the
-    code-side check that catches it if it does anyway."""
+def ground_tailor_result(result: TailorResult, candidate: dict,
+                         extra_allowed_terms: Optional[List[str]] = None) -> List[str]:
+    """Non-blocking warnings, shown on the (future, issue #12) review page --
+    never blocks rendering:
+      - profile/letter_paragraphs word counts outside the prompt's target
+        range (a style nit, not proof of an invented fact, so it's a warning
+        here rather than a blocking error in validate_tailor_result).
+      - an explicit "N years/jaar of experience" claim, which TAILOR_SYSTEM
+        forbids inventing outright.
+      - a 4-digit year or capitalized word/phrase in the free text that
+        doesn't appear anywhere in candidate.yaml's facts.
+
+    `extra_allowed_terms` lets a caller pass terms that are legitimately not
+    candidate facts but also aren't invented -- e.g. the vacancy's own
+    company name, or analysis.keywords the letter quotes back. Without this,
+    the employer's name flags on essentially every letter, since the prompt
+    explicitly asks the model to connect the candidate's experience to that
+    company."""
     warnings: List[str] = []
-    facts_blob = _facts_text_blob(candidate)
+
+    wc = _word_count(result.profile)
+    if not (PROFILE_WORD_RANGE[0] <= wc <= PROFILE_WORD_RANGE[1]):
+        warnings.append(f"profile is {wc} words, expected roughly "
+                        f"{PROFILE_WORD_RANGE[0]}-{PROFILE_WORD_RANGE[1]}.")
+    letter_wc = sum(_word_count(p) for p in result.letter_paragraphs)
+    if not (LETTER_WORD_RANGE[0] <= letter_wc <= LETTER_WORD_RANGE[1]):
+        warnings.append(f"letter_paragraphs total {letter_wc} words, expected roughly "
+                        f"{LETTER_WORD_RANGE[0]}-{LETTER_WORD_RANGE[1]}.")
+
+    facts_words = _facts_word_set(candidate)
+    allowed = {t.lower() for t in (extra_allowed_terms or [])}
     free_text = result.profile + " " + " ".join(result.letter_paragraphs)
+
+    for match in _YEARS_CLAIM_RE.finditer(free_text):
+        warnings.append(f"{match.group(0)!r} claims a specific amount of experience -- "
+                        "verify it wasn't invented.")
+
     seen = set()
     for match in _FACT_TOKEN_RE.finditer(free_text):
         token = match.group(0)
         key = token.lower()
-        if key in seen or key in _COMMON_CAPITALIZED_WORDS:
+        if key in seen or key in _COMMON_CAPITALIZED_WORDS or key in allowed:
             continue
         seen.add(key)
-        if key not in facts_blob:
+        if key not in facts_words:
             warnings.append(f"{token!r} appears in the generated text but not in "
                             "candidate.yaml's facts -- verify it wasn't invented.")
     return warnings
