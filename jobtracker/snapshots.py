@@ -53,12 +53,13 @@ class PostgresSnapshotStore:
 
     def save(self, url: str, job_id: str = "", platform: str = "",
              raw_source: str = "", extracted_text: str = "") -> dict:
-        # NULLIF(..., '') + COALESCE: an incoming EMPTY raw_source/extracted_text
-        # keeps whatever was already saved, rather than blanking it. This matters
-        # for the thin-content path, which saves the fetched raw HTML "in case a
-        # human wants to look at it later" -- without this, pasting the vacancy
-        # text afterwards (platform="paste", raw_source="") would silently wipe
-        # that raw HTML from the very row the paste is meant to complete.
+        # NULLIF(..., '') + COALESCE: an incoming EMPTY field keeps whatever
+        # was already saved, rather than blanking it. This matters for the
+        # thin-content path, which saves job_id="" and the fetched raw HTML
+        # "in case a human wants to look at it later" -- without this,
+        # pasting the vacancy text afterwards (platform="paste", raw_source="")
+        # would silently wipe that raw HTML and a previously-known job_id
+        # from the very row the paste is meant to complete.
         sid = snapshot_id(url)
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
@@ -66,7 +67,8 @@ class PostgresSnapshotStore:
                 "(snapshot_id, url, job_id, platform, raw_source, extracted_text) "
                 "VALUES (%s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (snapshot_id) DO UPDATE SET "
-                "job_id = EXCLUDED.job_id, platform = EXCLUDED.platform, "
+                "job_id = COALESCE(NULLIF(EXCLUDED.job_id, ''), vacancy_snapshots.job_id), "
+                "platform = COALESCE(NULLIF(EXCLUDED.platform, ''), vacancy_snapshots.platform), "
                 "raw_source = COALESCE(NULLIF(EXCLUDED.raw_source, ''), vacancy_snapshots.raw_source), "
                 "extracted_text = COALESCE(NULLIF(EXCLUDED.extracted_text, ''), "
                 "vacancy_snapshots.extracted_text)",
@@ -102,7 +104,13 @@ class LocalJSONSnapshotStore:
         data = self._load()
         existing = data.get(sid) or {}
         # Same empty-overwrite protection as PostgresSnapshotStore.save() -- see
-        # the comment there.
+        # the comment there. job_id is included too: the thin-content path
+        # saves job_id="" on a transient failure, which shouldn't erase a
+        # job_id a previous successful save already established for this URL.
+        if not job_id:
+            job_id = existing.get("job_id", "")
+        if not platform:
+            platform = existing.get("platform", "")
         if not raw_source:
             raw_source = existing.get("raw_source", "")
         if not extracted_text:
