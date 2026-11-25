@@ -70,21 +70,64 @@ def _parse_json_reply(reply: str) -> dict:
     return data
 
 
+def _require_list_of_dicts(data: dict, key: str) -> list:
+    value = data.get(key) or []
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise CandidateImportError(f"{key} must be a list of objects.")
+    return value
+
+
 def _validate_shape(data: dict) -> None:
+    """Raises CandidateImportError for anything that would either make a
+    later bullet-id lookup ambiguous (duplicate ids -- the entire point of
+    giving bullets ids) or crash/misrender at .docx render time (wrong
+    field types, a bullet with no usable text in either language)."""
     missing = [k for k in REQUIRED_TOP_LEVEL if k not in data]
     if missing:
         raise CandidateImportError(f"Import reply is missing required keys: {', '.join(missing)}")
     if not isinstance(data.get("personal"), dict) or not data["personal"].get("name"):
         raise CandidateImportError("Import reply is missing personal.name.")
-    for i, role in enumerate(data.get("experience") or []):
+
+    experience = _require_list_of_dicts(data, "experience")
+    education = _require_list_of_dicts(data, "education")
+    _require_list_of_dicts(data, "skills")
+    _require_list_of_dicts(data, "languages")
+
+    role_ids = []
+    for i, role in enumerate(experience):
         if not role.get("id"):
             raise CandidateImportError(f"experience[{i}] is missing an id.")
-        for j, bullet in enumerate(role.get("bullets") or []):
+        role_ids.append(role["id"])
+
+        bullets = role.get("bullets") or []
+        if not isinstance(bullets, list) or any(not isinstance(b, dict) for b in bullets):
+            raise CandidateImportError(f"experience[{i}].bullets must be a list of objects.")
+        bullet_ids = []
+        for j, bullet in enumerate(bullets):
             if not bullet.get("id"):
                 raise CandidateImportError(f"experience[{i}].bullets[{j}] is missing an id.")
-    for i, edu in enumerate(data.get("education") or []):
+            if not (bullet.get("nl") or bullet.get("en")):
+                raise CandidateImportError(
+                    f"experience[{i}].bullets[{j}] (id={bullet['id']!r}) has no nl or en text.")
+            bullet_ids.append(bullet["id"])
+        _check_no_duplicates(bullet_ids, f"experience[{i}].bullets")
+
+    _check_no_duplicates(role_ids, "experience")
+
+    edu_ids = []
+    for i, edu in enumerate(education):
         if not edu.get("id"):
             raise CandidateImportError(f"education[{i}] is missing an id.")
+        edu_ids.append(edu["id"])
+    _check_no_duplicates(edu_ids, "education")
+
+
+def _check_no_duplicates(ids: list, where: str) -> None:
+    seen = set()
+    for id_ in ids:
+        if id_ in seen:
+            raise CandidateImportError(f"Duplicate id {id_!r} in {where}.")
+        seen.add(id_)
 
 
 def draft_candidate_from_text(cv_text: str, caller: Callable[[str, str], str]) -> dict:
@@ -100,8 +143,17 @@ def draft_candidate_from_text(cv_text: str, caller: Callable[[str, str], str]) -
 
 
 def write_candidate_draft(data: dict, path: Path) -> Path:
-    """Write the draft for manual review. Never writes to config/candidate.yaml
-    itself -- that rename/copy is a deliberate manual step."""
+    """Write the draft for manual review. Refuses to write to
+    config/candidate.yaml itself -- the rename/copy from a reviewed draft is
+    a deliberate manual step, not something this function should do even if
+    asked to via --out, since an unreviewed LLM draft would otherwise
+    silently overwrite the user's real (git-ignored, unrecoverable) facts
+    file with no backup."""
+    from .generator import CANDIDATE_PATH
+    if path.resolve() == CANDIDATE_PATH.resolve():
+        raise CandidateImportError(
+            f"Refusing to write the draft directly to {CANDIDATE_PATH} -- "
+            "write it to a different path, review it, then copy it over yourself.")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=100),

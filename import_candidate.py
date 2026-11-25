@@ -50,11 +50,10 @@ def main(argv: list) -> int:
 
     try:
         data = draft_candidate_from_text(cv_text, caller)
+        out_path = write_candidate_draft(data, Path(args.out))
     except CandidateImportError as e:
         print(f"IMPORT FAILED: {e}")
         return 1
-
-    out_path = write_candidate_draft(data, Path(args.out))
     print(f"Draft written to {out_path}")
     print("Review it, fix anything wrong or missing, then rename/copy it to "
          "config/candidate.yaml yourself.")
