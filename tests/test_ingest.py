@@ -5,8 +5,10 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from jobtracker.ingest import ThinContentError, detect_platform, ingest_url
-from jobtracker.snapshots import LocalJSONSnapshotStore
+from jobtracker.snapshots import LocalJSONSnapshotStore, snapshot_id
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -29,17 +31,24 @@ class FakeSnapshotStore:
         return None
 
 
-def _fake_get(responses):
-    """responses: dict url-substring -> (json_body or None, text_body or "")."""
+def _fake_get(responses, calls=None):
+    """responses: dict EXACT url -> (json_body or None, text_body, status_or_none).
+    `calls`, if given, collects every requested URL so tests can assert on it."""
     def fake_get(url, headers=None, timeout=None, **kwargs):
-        for needle, (json_body, text_body) in responses.items():
-            if needle in url:
-                resp = MagicMock()
-                resp.raise_for_status = lambda: None
-                resp.json = (lambda jb=json_body: jb) if json_body is not None else (lambda: {})
-                resp.text = text_body
-                return resp
-        raise AssertionError(f"unexpected URL in test: {url}")
+        if calls is not None:
+            calls.append(url)
+        if url not in responses:
+            raise AssertionError(f"unexpected URL in test: {url}\nexpected one of: "
+                                 f"{sorted(responses)}")
+        json_body, text_body, status = responses[url]
+        resp = MagicMock()
+        if status and status >= 400:
+            resp.raise_for_status = MagicMock(side_effect=requests.HTTPError(f"{status} error"))
+        else:
+            resp.raise_for_status = lambda: None
+        resp.json = (lambda jb=json_body: jb) if json_body is not None else (lambda: {})
+        resp.text = text_body
+        return resp
     return fake_get
 
 
@@ -63,20 +72,25 @@ def test_detect_platform():
 
 
 # --------------------------------------------------------------------------- #
-# Known-platform detail re-fetch                                               #
+# Known-platform detail re-fetch: each test asserts the EXACT detail URL      #
+# that was requested, not just a substring -- this is what catches a regex    #
+# that extracts the wrong path (e.g. dropping "/job" for Workday).            #
 # --------------------------------------------------------------------------- #
 def test_ingest_greenhouse_detail():
     url = "https://job-boards.greenhouse.io/acme/jobs/1234567"
+    detail_url = "https://boards-api.greenhouse.io/v1/boards/acme/jobs/1234567?content=true"
     detail = {
-        "title": "Data Engineer", "absolute_url": url,
+        "id": 1234567, "title": "Data Engineer", "absolute_url": url,
         "location": {"name": "Amsterdam"}, "content": "<p>Build pipelines.</p>",
         "updated_at": "2026-01-10T00:00:00Z",
     }
-    store = FakeSnapshotStore()
-    with patch("jobtracker.ingest.requests.get", _fake_get({"boards-api.greenhouse.io": (detail, "{}")})):
+    store, calls = FakeSnapshotStore(), []
+    with patch("jobtracker.ingest.requests.get", _fake_get({detail_url: (detail, "{}", None)}, calls)):
         job = ingest_url(url, snapshot_store=store)
+    assert calls == [detail_url]
     assert job["title"] == "Data Engineer"
     assert job["source"] == "Greenhouse"
+    assert job["job_id"] == "greenhouse:1234567"
     assert "Build pipelines" in job["description"]
     assert store.saved[0]["platform"] == "greenhouse"
     print("PASS test_ingest_greenhouse_detail")
@@ -84,14 +98,16 @@ def test_ingest_greenhouse_detail():
 
 def test_ingest_lever_detail():
     url = "https://jobs.lever.co/acme/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    detail_url = "https://api.lever.co/v0/postings/acme/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee?mode=json"
     detail = {
+        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         "text": "Backend Engineer", "hostedUrl": url,
         "categories": {"location": "Remote"}, "descriptionPlain": "Build APIs.",
-        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     }
-    store = FakeSnapshotStore()
-    with patch("jobtracker.ingest.requests.get", _fake_get({"api.lever.co": (detail, "{}")})):
+    store, calls = FakeSnapshotStore(), []
+    with patch("jobtracker.ingest.requests.get", _fake_get({detail_url: (detail, "{}", None)}, calls)):
         job = ingest_url(url, snapshot_store=store)
+    assert calls == [detail_url]
     assert job["title"] == "Backend Engineer"
     assert job["source"] == "Lever"
     assert store.saved[0]["platform"] == "lever"
@@ -100,14 +116,16 @@ def test_ingest_lever_detail():
 
 def test_ingest_ashby_detail():
     url = "https://jobs.ashbyhq.com/mollie/d056f390-1d70-408e-8f85-2360d41eaa84"
+    board_url = "https://api.ashbyhq.com/posting-api/job-board/mollie"
     board = {"jobs": [
         {"id": "other-id", "title": "Other role"},
         {"id": "d056f390-1d70-408e-8f85-2360d41eaa84", "title": "Support Engineer",
          "jobUrl": url, "descriptionHtml": "<p>Help customers.</p>"},
     ]}
-    store = FakeSnapshotStore()
-    with patch("jobtracker.ingest.requests.get", _fake_get({"api.ashbyhq.com": (board, "{}")})):
+    store, calls = FakeSnapshotStore(), []
+    with patch("jobtracker.ingest.requests.get", _fake_get({board_url: (board, "{}", None)}, calls)):
         job = ingest_url(url, snapshot_store=store)
+    assert calls == [board_url]
     assert job["title"] == "Support Engineer"
     assert job["job_id"] == "ashby:d056f390-1d70-408e-8f85-2360d41eaa84"
     assert store.saved[0]["platform"] == "ashby"
@@ -116,6 +134,7 @@ def test_ingest_ashby_detail():
 
 def test_ingest_smartrecruiters_detail():
     url = "https://jobs.smartrecruiters.com/Acme/744000143139580"
+    detail_url = "https://api.smartrecruiters.com/v1/companies/Acme/postings/744000143139580"
     detail = {
         "id": "744000143139580", "name": "Principal Engineer",
         "company": {"identifier": "Acme", "name": "Acme"},
@@ -123,10 +142,10 @@ def test_ingest_smartrecruiters_detail():
         "postingUrl": url,
         "jobAd": {"sections": {"jobDescription": {"text": "<p>Lead the platform.</p>"}}},
     }
-    store = FakeSnapshotStore()
-    with patch("jobtracker.ingest.requests.get",
-              _fake_get({"api.smartrecruiters.com": (detail, "{}")})):
+    store, calls = FakeSnapshotStore(), []
+    with patch("jobtracker.ingest.requests.get", _fake_get({detail_url: (detail, "{}", None)}, calls)):
         job = ingest_url(url, snapshot_store=store)
+    assert calls == [detail_url]
     assert job["title"] == "Principal Engineer"
     assert job["company"] == "Acme"
     assert "Lead the platform" in job["description"]
@@ -136,48 +155,100 @@ def test_ingest_smartrecruiters_detail():
 
 def test_ingest_teamtailor_detail():
     url = "https://acme.teamtailor.com/jobs/123456-data-engineer"
+    list_url = "https://acme.teamtailor.com/jobs.json"
     listing = {"items": [
         {"id": "x", "title": "Other role", "url": "https://acme.teamtailor.com/jobs/999999-other"},
         {"id": "y", "title": "Data Engineer", "url": url, "content_text": "Build data pipelines."},
     ]}
-    store = FakeSnapshotStore()
-    with patch("jobtracker.ingest.requests.get", _fake_get({"acme.teamtailor.com/jobs.json": (listing, "{}")})):
+    store, calls = FakeSnapshotStore(), []
+    with patch("jobtracker.ingest.requests.get", _fake_get({list_url: (listing, "{}", None)}, calls)):
         job = ingest_url(url, snapshot_store=store)
+    assert calls == [list_url]
     assert job["title"] == "Data Engineer"
     assert store.saved[0]["platform"] == "teamtailor"
     print("PASS test_ingest_teamtailor_detail")
 
 
 def test_ingest_workday_detail():
-    url = "https://amgen.wd1.myworkdayjobs.com/Careers/job/Netherlands-Breda/Scientist_R-200123"
+    # Regression test for the "/job" segment bug: a wrong regex dropped "/job"
+    # from the captured external path, so the built CXS URL 404s against the
+    # real API. Asserting the exact detail_url is what catches that class of
+    # bug -- a substring match on just the host would pass either way.
+    url = "https://amgen.wd1.myworkdayjobs.com/en-US/Careers/job/Netherlands-Breda/Scientist_R-200123"
+    detail_url = ("https://amgen.wd1.myworkdayjobs.com/wday/cxs/amgen/Careers"
+                  "/job/Netherlands-Breda/Scientist_R-200123")
     detail = {"jobPostingInfo": {
         "title": "Scientist, Bioinformatics",
         "jobDescription": "<p>Build NGS pipelines.</p>",
         "location": "Netherlands - Breda",
     }}
-    store = FakeSnapshotStore()
-    with patch("jobtracker.ingest.requests.get",
-              _fake_get({"amgen.wd1.myworkdayjobs.com/wday/cxs": (detail, "{}")})):
+    store, calls = FakeSnapshotStore(), []
+    with patch("jobtracker.ingest.requests.get", _fake_get({detail_url: (detail, "{}", None)}, calls)):
         job = ingest_url(url, snapshot_store=store)
+    assert calls == [detail_url]
     assert job["title"] == "Scientist, Bioinformatics"
     assert job["source"] == "Workday"
+    assert job["url"] == ("https://amgen.wd1.myworkdayjobs.com/Careers"
+                          "/job/Netherlands-Breda/Scientist_R-200123")
     assert "Build NGS pipelines" in job["description"]
     assert store.saved[0]["platform"] == "workday"
     print("PASS test_ingest_workday_detail")
 
 
+def test_ingest_workday_detail_strips_tracking_query_string():
+    # Pasted vacancy URLs commonly carry apply-tracking query params; they
+    # must not leak into the CXS detail URL or the job_id.
+    url = ("https://amgen.wd1.myworkdayjobs.com/en-US/Careers/job/NL/"
+          "Role_R-200123?source=LinkedIn&utm_campaign=x")
+    detail_url = "https://amgen.wd1.myworkdayjobs.com/wday/cxs/amgen/Careers/job/NL/Role_R-200123"
+    detail = {"jobPostingInfo": {"title": "Role", "jobDescription": "<p>Do things.</p>"}}
+    store, calls = FakeSnapshotStore(), []
+    with patch("jobtracker.ingest.requests.get", _fake_get({detail_url: (detail, "{}", None)}, calls)):
+        job = ingest_url(url, snapshot_store=store)
+    assert calls == [detail_url]
+    assert job["job_id"] == "workday:amgen:Role_R-200123"
+    assert "?" not in job["url"]
+    print("PASS test_ingest_workday_detail_strips_tracking_query_string")
+
+
 def test_ingest_recruitee_detail():
     url = "https://acme.recruitee.com/o/data-engineer"
+    detail_url = "https://acme.recruitee.com/api/offers/data-engineer"
     detail = {"offer": {
         "title": "Data Engineer", "careers_url": url,
         "description": "<p>Build data infra.</p>", "guid": "abc123",
     }}
-    store = FakeSnapshotStore()
-    with patch("jobtracker.ingest.requests.get", _fake_get({"acme.recruitee.com/api/offers": (detail, "{}")})):
+    store, calls = FakeSnapshotStore(), []
+    with patch("jobtracker.ingest.requests.get", _fake_get({detail_url: (detail, "{}", None)}, calls)):
         job = ingest_url(url, snapshot_store=store)
+    assert calls == [detail_url]
     assert job["title"] == "Data Engineer"
     assert store.saved[0]["platform"] == "recruitee"
     print("PASS test_ingest_recruitee_detail")
+
+
+# --------------------------------------------------------------------------- #
+# Known-platform fetch failure falls through to the generic path              #
+# --------------------------------------------------------------------------- #
+def test_ingest_falls_back_to_generic_when_known_platform_404s():
+    # A SmartRecruiters "Apply" link matches the jobs.smartrecruiters.com/<a>/<b>
+    # pattern but with the wrong path shape (oneclick-ui/company/<slug>/...) --
+    # the resulting detail call 404s. That must fall through to the generic
+    # trafilatura path instead of surfacing a raw request error.
+    url = "https://jobs.smartrecruiters.com/oneclick-ui/company/Acme/publication/abc-123"
+    bad_detail_url = "https://api.smartrecruiters.com/v1/companies/oneclick-ui/postings/company"
+    html = (FIXTURES / "generic_vacancy.html").read_text(encoding="utf-8")
+    store, calls = FakeSnapshotStore(), []
+    responses = {
+        bad_detail_url: (None, "", 404),
+        url: (None, html, None),
+    }
+    with patch("jobtracker.ingest.requests.get", _fake_get(responses, calls)):
+        job = ingest_url(url, snapshot_store=store)
+    assert calls == [bad_detail_url, url]
+    assert job["source"] == "Ingested"
+    assert store.saved[0]["platform"] == "html"
+    print("PASS test_ingest_falls_back_to_generic_when_known_platform_404s")
 
 
 # --------------------------------------------------------------------------- #
@@ -187,13 +258,13 @@ def test_ingest_generic_page_uses_trafilatura():
     url = "https://example-institute.org/careers/research-software-engineer"
     html = (FIXTURES / "generic_vacancy.html").read_text(encoding="utf-8")
     store = FakeSnapshotStore()
-    with patch("jobtracker.ingest.requests.get", _fake_get({"example-institute.org": (None, html)})):
+    with patch("jobtracker.ingest.requests.get", _fake_get({url: (None, html, None)})):
         job = ingest_url(url, snapshot_store=store)
     assert job["source"] == "Ingested"
-    assert "Research Software Engineer" in job["title"]
+    assert job["title"] == "Research Software Engineer"  # boilerplate site-name tail stripped
+    assert job["company"] == "Example Institute"  # domain-derived fallback (no og:site_name)
     assert "genomic" in job["description"].lower()
-    # chrome stripped by trafilatura
-    assert "cookie" not in job["description"].lower()
+    assert "cookie" not in job["description"].lower()  # chrome stripped by trafilatura
     assert store.saved[0]["platform"] == "html"
     assert store.saved[0]["raw_source"] == html
     print("PASS test_ingest_generic_page_uses_trafilatura")
@@ -201,7 +272,8 @@ def test_ingest_generic_page_uses_trafilatura():
 
 def test_ingest_pasted_text_skips_network():
     store = FakeSnapshotStore()
-    text = "Senior Developer at Acme. " + ("Relevant responsibilities and requirements. " * 10).strip()
+    text = ("Senior Developer at Acme. "
+           + ("Relevant responsibilities and requirements. " * 10).strip())
     job = ingest_url("https://example.com/vacancy/1", paste_text=text, snapshot_store=store)
     assert job["source"] == "Pasted"
     assert job["description"] == text
@@ -209,17 +281,32 @@ def test_ingest_pasted_text_skips_network():
     print("PASS test_ingest_pasted_text_skips_network")
 
 
-def test_ingest_thin_content_raises():
+def test_ingest_pasted_text_takes_precedence_over_url():
+    # Pasted text is an explicit override: even a URL that WOULD resolve via a
+    # known-platform adapter must not be fetched when text is also pasted.
+    store, calls = FakeSnapshotStore(), []
+    with patch("jobtracker.ingest.requests.get", _fake_get({}, calls)):
+        job = ingest_url("https://jobs.lever.co/acme/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                         paste_text="Pasted override text.", snapshot_store=store)
+    assert calls == []
+    assert job["source"] == "Pasted"
+    print("PASS test_ingest_pasted_text_takes_precedence_over_url")
+
+
+def test_ingest_thin_content_raises_and_still_saves_snapshot():
     url = "https://spa-example.com/careers/1"
     html = "<html><body><div id='app'></div></body></html>"
-    with patch("jobtracker.ingest.requests.get", _fake_get({"spa-example.com": (None, html)})):
+    store = FakeSnapshotStore()
+    with patch("jobtracker.ingest.requests.get", _fake_get({url: (None, html, None)})):
         try:
-            ingest_url(url, snapshot_store=FakeSnapshotStore())
+            ingest_url(url, snapshot_store=store)
         except ThinContentError as e:
             assert e.url == url
         else:
             raise AssertionError("expected ThinContentError")
-    print("PASS test_ingest_thin_content_raises")
+    assert store.saved[0]["platform"] == "thin"
+    assert store.saved[0]["raw_source"] == html
+    print("PASS test_ingest_thin_content_raises_and_still_saves_snapshot")
 
 
 def test_ingest_requires_url_or_paste():
@@ -230,6 +317,17 @@ def test_ingest_requires_url_or_paste():
     else:
         raise AssertionError("expected ValueError")
     print("PASS test_ingest_requires_url_or_paste")
+
+
+# --------------------------------------------------------------------------- #
+# snapshot_id: host is normalized, but path case is kept significant          #
+# --------------------------------------------------------------------------- #
+def test_snapshot_id_normalizes_host_case_only():
+    assert snapshot_id("https://Example.COM/careers/Role") == \
+        snapshot_id("https://example.com/careers/Role")
+    assert snapshot_id("https://example.com/careers/Role") != \
+        snapshot_id("https://example.com/careers/role")
+    print("PASS test_snapshot_id_normalizes_host_case_only")
 
 
 # --------------------------------------------------------------------------- #
@@ -261,10 +359,14 @@ if __name__ == "__main__":
     test_ingest_smartrecruiters_detail()
     test_ingest_teamtailor_detail()
     test_ingest_workday_detail()
+    test_ingest_workday_detail_strips_tracking_query_string()
     test_ingest_recruitee_detail()
+    test_ingest_falls_back_to_generic_when_known_platform_404s()
     test_ingest_generic_page_uses_trafilatura()
     test_ingest_pasted_text_skips_network()
-    test_ingest_thin_content_raises()
+    test_ingest_pasted_text_takes_precedence_over_url()
+    test_ingest_thin_content_raises_and_still_saves_snapshot()
     test_ingest_requires_url_or_paste()
+    test_snapshot_id_normalizes_host_case_only()
     test_snapshot_survives_posting_removed()
     print("\nAll ingest tests passed.")
