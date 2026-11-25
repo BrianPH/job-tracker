@@ -255,6 +255,19 @@ def test_allowed_terms_includes_company_and_keywords():
     print("PASS test_allowed_terms_includes_company_and_keywords")
 
 
+def test_allowed_terms_splits_multi_word_keywords():
+    # ground_tailor_result checks one capitalized token at a time -- a
+    # multi-word keyword like "Azure DevOps" must also allow "Azure" and
+    # "DevOps" individually, or each word of a keyword the letter
+    # legitimately echoes back flags as an unverified fact.
+    job = {"title": "Data Engineer", "company": "Acme", "description": "Build things."}
+    analysis = AnalysisResult(language="en", keywords=["Azure DevOps"])
+    terms = allowed_terms(job, analysis)
+    assert "Azure DevOps" in terms
+    assert "Azure" in terms and "DevOps" in terms
+    print("PASS test_allowed_terms_splits_multi_word_keywords")
+
+
 def test_allowed_terms_skips_missing_company():
     job = {"title": "Data Engineer", "description": "Build things."}
     analysis = AnalysisResult(language="en")
@@ -471,6 +484,7 @@ if __name__ == "__main__":
     test_make_client_returns_none_without_api_key()
     test_make_client_accepts_auth_token()
     test_allowed_terms_includes_company_and_keywords()
+    test_allowed_terms_splits_multi_word_keywords()
     test_allowed_terms_skips_missing_company()
     test_analyse_vacancy_caps_vacancy_text_at_desc_chars()
     test_tailor_application_caps_description_at_desc_chars()

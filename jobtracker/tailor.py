@@ -356,9 +356,14 @@ def allowed_terms(job: dict, analysis: AnalysisResult) -> list:
     """Terms to pass as `generation_schema.ground_tailor_result`'s
     `extra_allowed_terms` -- legitimately not a candidate fact, but also not
     invented, since TAILOR_SYSTEM explicitly tells the model to connect the
-    candidate's experience to this vacancy's company and keywords. A future
-    caller (issue #12) should use this instead of hand-rolling the list, so
-    the one place that knows the prompt also owns what it allows through."""
+    candidate's experience to this vacancy's company and keywords. Used by
+    the review page (issue #12), confirmed live against a real vacancy: a
+    multi-word keyword (e.g. "Azure DevOps") is also split into its
+    individual words, since `ground_tailor_result` checks one capitalized
+    token at a time -- without this, every word of a multi-word keyword
+    the letter legitimately echoes back flags as an unverified fact."""
     terms = [job.get("company", "")]
     terms.extend(analysis.keywords)
-    return [t for t in terms if t]
+    terms = [t for t in terms if t]
+    words = [w for t in terms for w in t.split() if len(t.split()) > 1]
+    return terms + words
