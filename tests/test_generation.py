@@ -15,7 +15,7 @@ from jobtracker.generation_schema import AnalysisResult, TailorResult
 from jobtracker.tailor import CreditBalanceError
 
 CANDIDATE = yaml.safe_load(open("config/candidate.example.yaml", encoding="utf-8"))
-JOB = {"title": "Data Engineer", "company": "Acme", "location": "Remote",
+JOB = {"job_id": "test:job-1", "title": "Data Engineer", "company": "Acme", "location": "Remote",
       "description": "Build data pipelines with Python and SQL."}
 
 
@@ -115,6 +115,7 @@ def test_generate_or_handoff_no_client_triggers_handoff():
         payload = json.loads(result["request_path"].read_text(encoding="utf-8"))
         assert payload["analysis"] is None
         assert payload["job"]["title"] == "Data Engineer"
+        assert payload["job"]["job_id"] == "test:job-1"
         print("PASS test_generate_or_handoff_no_client_triggers_handoff")
     _with_tmp_out(run)
 

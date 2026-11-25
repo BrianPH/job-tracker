@@ -56,7 +56,13 @@ def write_handoff_request(job: dict, candidate: dict, lang: str, error: str,
     would (apply_handoff_upload, below)."""
     path = _request_path(job, candidate, lang, out_dir)
     payload = {
+        # job_id is included so .claude/commands/tailor.md can find this
+        # file by searching applications/*/request.json rather than having
+        # to re-derive the folder name -- an ADHOC_JOBS job (ingested from a
+        # URL/paste) exists only in the webapp's memory, not in any store a
+        # separate Claude Code session could query by job_id.
         "job": {
+            "job_id": job.get("job_id", ""),
             "title": job.get("title", ""), "company": job.get("company", ""),
             "location": job.get("location", ""), "description": job.get("description", ""),
         },
