@@ -86,10 +86,19 @@
         {% if gen and gen.state == "done" %}
           <div class="filelinks">
             {% for f in gen.files %}<a href="/applications/{{ f }}">{{ f.split("/")[-1] }}</a>{% endfor %}
-            {% if not gen.llm_used %}<span class="muted" title="LLM niet bereikbaar; standaardtekst gebruikt">(template)</span>{% endif %}
           </div>
         {% elif gen and gen.state == "running" %}
           <span class="muted">genereren... (ververs de pagina)</span>
+        {% elif gen and gen.state == "handoff" %}
+          <div class="handoff">
+            <span class="err" title="{{ gen.error }}">generatie mislukt — handmatig afronden:</span><br>
+            <a href="/jobs/{{ j.job_id }}/request.json">download request.json</a>
+            <form method="post" action="/jobs/{{ j.job_id }}/generation-upload"
+                  enctype="multipart/form-data" class="inline">
+              <input type="file" name="generation_file" accept=".json" required style="width:130px">
+              <button class="small" type="submit">upload generation.json</button>
+            </form>
+          </div>
         {% elif gen and gen.state == "error" %}
           <span class="err" title="{{ gen.error }}">fout</span>
         {% else %}

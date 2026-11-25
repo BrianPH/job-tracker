@@ -119,6 +119,81 @@ def main():
     assert webapp.ADHOC_JOBS.get("ingest:abc123") == fake_job
     print("PASS ingest success path shows the generated job and stores it in ADHOC_JOBS")
 
+    # --- issue #11/M3b: JSON handoff routes ------------------------------- #
+    from jobtracker.generation import HANDOFF_STATUS
+    assert HANDOFF_STATUS in webapp.STATUSES
+    print("PASS handoff status is a selectable job status")
+
+    request_json_path = tmp / "request.json"
+    request_json_path.write_text('{"job": {"title": "x"}}', encoding="utf-8")
+    webapp.GENERATION["test:1"] = {"state": "handoff", "error": "no credit",
+                                   "request_path": str(request_json_path), "files": []}
+
+    r = client.get("/jobs/test:1/request.json")
+    assert r.status_code == 200 and '"title": "x"' in r.text
+    print("PASS request.json download serves the handoff file")
+
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "download request.json" in r.text and "upload generation.json" in r.text
+    print("PASS index page renders the handoff download/upload block without error")
+
+    webapp.ADHOC_JOBS["adhoc:handoff"] = {**fake_job, "job_id": "adhoc:handoff"}
+    webapp.GENERATION["adhoc:handoff"] = {"state": "handoff", "error": "no credit",
+                                          "request_path": str(request_json_path), "files": []}
+    r = client.get("/ingest?job_id=adhoc:handoff")
+    assert r.status_code == 200
+    assert "Upload generation.json" in r.text
+    webapp.ADHOC_JOBS.pop("adhoc:handoff", None)
+    webapp.GENERATION.pop("adhoc:handoff", None)
+    print("PASS ingest page renders the handoff download/upload block without error")
+
+    r = client.get("/jobs/unknown-job/request.json")
+    assert r.status_code == 404
+    print("PASS request.json download 404s for a job with no handoff state")
+
+    webapp.GENERATION.pop("test:1", None)
+    r = client.get("/jobs/test:1/request.json")
+    assert r.status_code == 404
+    print("PASS request.json download 404s once there is no handoff state at all")
+
+    from jobtracker.generator import OUTPUT_DIR
+    fake_cv = OUTPUT_DIR / "Acme_Data_Engineer" / "CV_Test.docx"
+    fake_letter = OUTPUT_DIR / "Acme_Data_Engineer" / "Cover_Letter.docx"
+
+    with patch("jobtracker.webapp.generation.apply_handoff_upload",
+              lambda job, data, **kw: {"state": "done", "cv": fake_cv,
+                                       "letter": fake_letter, "lang": "en"}):
+        files = {"generation_file": ("generation.json", b'{"language": "en"}', "application/json")}
+        r = client.post("/jobs/test:1/generation-upload", files=files, follow_redirects=False)
+    assert r.status_code == 303
+    assert webapp.GENERATION["test:1"]["state"] == "done"
+    assert webapp.GENERATION["test:1"]["files"] == [
+        "Acme_Data_Engineer/CV_Test.docx", "Acme_Data_Engineer/Cover_Letter.docx"]
+    print("PASS valid generation.json upload renders and clears the handoff state")
+
+    webapp.GENERATION["test:1"] = {"state": "handoff", "error": "no credit", "files": []}
+    with patch("jobtracker.webapp.generation.apply_handoff_upload",
+              lambda job, data, **kw: {"state": "invalid", "errors": ["bad bullet id"]}):
+        files = {"generation_file": ("generation.json", b'{"language": "en"}', "application/json")}
+        r = client.post("/jobs/test:1/generation-upload", files=files, follow_redirects=False)
+    assert r.status_code == 303
+    assert webapp.GENERATION["test:1"]["state"] == "handoff"
+    assert "bad bullet id" in webapp.GENERATION["test:1"]["error"]
+    print("PASS invalid generation.json upload stays in the handoff state with the errors shown")
+
+    files = {"generation_file": ("generation.json", b"not json at all", "application/json")}
+    r = client.post("/jobs/test:1/generation-upload", files=files, follow_redirects=False)
+    assert r.status_code == 303
+    assert "not valid JSON" in webapp.GENERATION["test:1"]["error"]
+    print("PASS a non-JSON upload is rejected without calling the validator")
+
+    r = client.post("/jobs/unknown-job/generation-upload",
+                    files={"generation_file": ("g.json", b"{}", "application/json")},
+                    follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    print("PASS generation-upload for an unknown job redirects without error")
+
     print("\nAll webapp tests passed.")
 
 
