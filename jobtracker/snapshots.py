@@ -18,10 +18,21 @@ import json
 import os
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 
 def snapshot_id(url: str) -> str:
-    return hashlib.sha1(url.strip().lower().encode("utf-8")).hexdigest()[:16]
+    """Hash a normalized form of the URL: only the scheme and host are
+    lowercased (hosts are case-insensitive by spec), the path/query are kept
+    as-is since some servers do treat path case as significant."""
+    url = url.strip()
+    try:
+        parts = urlsplit(url)
+        normalized = urlunsplit(parts._replace(scheme=parts.scheme.lower(),
+                                                netloc=parts.netloc.lower())) if parts.scheme else url
+    except ValueError:
+        normalized = url
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
 
 
 class PostgresSnapshotStore:
