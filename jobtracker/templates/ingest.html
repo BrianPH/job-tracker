@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+  <p class="muted">Plak een vacature-URL om een CV + brief te genereren zonder dat de vacature
+    eerst gescraped moet zijn. Bekende platforms (Greenhouse, Lever, Ashby, SmartRecruiters,
+    Teamtailor, Workday, Recruitee) worden direct via hun eigen detail-API opgehaald; andere
+    pagina's worden gescraped en met trafilatura geëxtraheerd. Lukt dat niet (bijv. een
+    client-rendered pagina), plak dan de vacaturetekst erbij.</p>
+
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+
+  <form method="post" action="/ingest">
+    <label><b>Vacature-URL</b>
+      <input type="text" name="url" placeholder="https://..." value="{{ url }}" style="width:100%">
+    </label>
+    <label><b>Of plak de vacaturetekst (optioneel — als dit veld gevuld is, wordt dit gebruikt in
+      plaats van de URL automatisch op te halen, ook als de URL wel leesbaar zou zijn)</b>
+      <textarea name="paste_text" placeholder="Plak hier de vacaturetekst..."></textarea>
+    </label>
+    <p><button type="submit">Genereer CV + brief</button></p>
+  </form>
+</div>
+
+{% if job %}
+<div class="card">
+  <p><b>{{ job.title }}</b>{% if job.company %} — {{ job.company }}{% endif %}
+    <span class="muted">({{ job.source }})</span></p>
+  {% if job.url %}<p><a href="{{ job.url }}" target="_blank" rel="noopener">{{ job.url }}</a></p>{% endif %}
+
+  {% set gen = generation.get(job_id) %}
+  {% if gen and gen.state == "done" %}
+    <div class="filelinks">
+      {% for f in gen.files %}<a href="/applications/{{ f }}">{{ f.split("/")[-1] }}</a>{% endfor %}
+      {% if not gen.llm_used %}<span class="muted" title="LLM niet bereikbaar; standaardtekst gebruikt">(template)</span>{% endif %}
+    </div>
+  {% elif gen and gen.state == "running" %}
+    <p class="muted">genereren... (<a href="/ingest?job_id={{ job_id }}">ververs de pagina</a>)</p>
+  {% elif gen and gen.state == "error" %}
+    <p class="err">fout: {{ gen.error }}</p>
+  {% endif %}
+</div>
+{% endif %}
+
+{% endblock %}

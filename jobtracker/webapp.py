@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .generator import OUTPUT_DIR, generate_application
+from .ingest import IngestInputError, ThinContentError, ingest_url
 from .pipeline import ROOT, load_env, load_profile, run_pipeline
 from .storage import make_store
 
@@ -36,6 +37,7 @@ STATUSES = ["New", "Reviewing", "Applied", "Rejected"]
 # --- in-memory state (single local user) ------------------------------------ #
 SCRAPE = {"running": False, "log": [], "last_summary": None}
 GENERATION = {}  # job_id -> {"state": "running"|"done"|"error", "files": [...], "error": str}
+ADHOC_JOBS = {}  # job_id -> job dict, for jobs ingested from a URL/paste (not in the DB)
 _LOCK = threading.Lock()
 
 
@@ -152,6 +154,61 @@ def generate(job_id: str, background_tasks: BackgroundTasks):
         GENERATION[job_id] = {"state": "running", "files": []}
         background_tasks.add_task(_generate_worker, job_id, job)
     return RedirectResponse("/", status_code=303)
+
+
+# --- generate from a bare URL / pasted text ----------------------------------- #
+@app.get("/ingest", response_class=HTMLResponse)
+def ingest_form(request: Request, job_id: str = ""):
+    job = ADHOC_JOBS.get(job_id) if job_id else None
+    return templates.TemplateResponse(request, "ingest.html", {
+        "job": job, "job_id": job_id, "generation": GENERATION, "error": "", "url": "",
+    })
+
+
+@app.post("/ingest")
+def ingest_submit(background_tasks: BackgroundTasks,
+                  url: str = Form(""), paste_text: str = Form("")):
+    try:
+        job = ingest_url(url, paste_text or None)
+    except ThinContentError as e:
+        print(f"  [ingest] thin content for {e.url} ({len(e.raw_html)} raw chars fetched)")
+        params = urlencode({"error": "thin", "url": url})
+        return RedirectResponse(f"/ingest/error?{params}", status_code=303)
+    except IngestInputError as e:
+        # user input error (neither url nor paste_text given) -- safe to show as-is.
+        # Deliberately NOT a bare `except ValueError`: several requests.exceptions
+        # classes (MissingSchema, InvalidSchema, InvalidURL -- e.g. a URL pasted
+        # without "https://") also subclass ValueError, and their messages are
+        # library-internal wording that must go through the generic branch below.
+        params = urlencode({"error": str(e), "url": url})
+        return RedirectResponse(f"/ingest/error?{params}", status_code=303)
+    except Exception as e:  # noqa: BLE001 - don't reflect raw exception text into the page
+        print(f"  [ingest] fetch failed for {url}: {e}")
+        params = urlencode({"error": "fetch_failed", "url": url})
+        return RedirectResponse(f"/ingest/error?{params}", status_code=303)
+
+    job_id = job["job_id"]
+    ADHOC_JOBS[job_id] = job
+    current = GENERATION.get(job_id, {})
+    if current.get("state") != "running":
+        GENERATION[job_id] = {"state": "running", "files": []}
+        background_tasks.add_task(_generate_worker, job_id, job)
+    return RedirectResponse(f"/ingest?job_id={job_id}", status_code=303)
+
+
+@app.get("/ingest/error", response_class=HTMLResponse)
+def ingest_error(request: Request, error: str = "", url: str = ""):
+    if error == "thin":
+        message = ("Kon de vacaturetekst niet automatisch ophalen (waarschijnlijk een "
+                  "client-rendered pagina). Plak de vacaturetekst hieronder en probeer opnieuw.")
+    elif error == "fetch_failed":
+        message = ("Ophalen van de URL is mislukt. Controleer de URL, of plak de "
+                  "vacaturetekst hieronder.")
+    else:
+        message = error  # a safe, user-input-level ValueError message
+    return templates.TemplateResponse(request, "ingest.html", {
+        "job": None, "job_id": "", "generation": GENERATION, "error": message, "url": url,
+    })
 
 
 @app.get("/applications/{path:path}")
