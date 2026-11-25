@@ -7,7 +7,14 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from jobtracker.ingest import ThinContentError, detect_platform, ingest_url
+from jobtracker.ingest import (
+    IngestInputError,
+    ThinContentError,
+    _clean_title,
+    _company_from_domain,
+    detect_platform,
+    ingest_url,
+)
 from jobtracker.snapshots import LocalJSONSnapshotStore, snapshot_id
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -312,11 +319,109 @@ def test_ingest_thin_content_raises_and_still_saves_snapshot():
 def test_ingest_requires_url_or_paste():
     try:
         ingest_url("", snapshot_store=FakeSnapshotStore())
-    except ValueError:
+    except IngestInputError:
         pass
     else:
-        raise AssertionError("expected ValueError")
+        raise AssertionError("expected IngestInputError")
     print("PASS test_ingest_requires_url_or_paste")
+
+
+def test_ingest_pasted_text_fills_company_and_title_from_url():
+    # Regression test: the paste path used to ship company="" and the raw
+    # (uncleaned) first line as title, producing "Dear  team," and "...bij ."
+    # in the generated letter/CV for every pasted vacancy.
+    store = FakeSnapshotStore()
+    job = ingest_url("https://werkenbij.acme.com/vacancy/1",
+                     paste_text="Senior Developer - Careers | Acme\n\nFull vacancy text.",
+                     snapshot_store=store)
+    assert job["company"] == "Acme"
+    assert job["title"] == "Senior Developer"
+    print("PASS test_ingest_pasted_text_fills_company_and_title_from_url")
+
+
+def test_ingest_pasted_text_without_url_has_no_company():
+    # No URL at all (pure copy-paste, no "fetch failed" context) -> no domain
+    # to derive a company from; empty is the honest answer, not a guess.
+    store = FakeSnapshotStore()
+    job = ingest_url("", paste_text="Some vacancy text here.", snapshot_store=store)
+    assert job["company"] == ""
+    print("PASS test_ingest_pasted_text_without_url_has_no_company")
+
+
+# --------------------------------------------------------------------------- #
+# Finding B: trafilatura's sitename falls back to a bare-domain form (and     #
+# strips a leading "www."), which must not be mistaken for a real signal.     #
+# --------------------------------------------------------------------------- #
+def test_ingest_generic_page_www_prefix_no_sitename_uses_domain_fallback():
+    url = "https://www.acme-labs.com/careers/data-engineer"
+    html = ("<html><head><title>Data Engineer</title></head><body><p>"
+           + ("Build data pipelines and own the platform. " * 15) + "</p></body></html>")
+    store = FakeSnapshotStore()
+    with patch("jobtracker.ingest.requests.get", _fake_get({url: (None, html, None)})):
+        job = ingest_url(url, snapshot_store=store)
+    # trafilatura's sitename fallback for this URL is "acme-labs.com" (www
+    # stripped) -- without the bare-domain guard this would be used as-is.
+    assert job["company"] == "Acme Labs"
+    print("PASS test_ingest_generic_page_www_prefix_no_sitename_uses_domain_fallback")
+
+
+def test_ingest_generic_page_with_real_sitename_is_kept():
+    url = "https://www.acme-labs.com/careers/data-engineer"
+    html = ("<html><head><title>Data Engineer</title>"
+           "<meta property=\"og:site_name\" content=\"Acme Labs Careers\"></head>"
+           "<body><p>" + ("Build data pipelines and own the platform. " * 15)
+           + "</p></body></html>")
+    store = FakeSnapshotStore()
+    with patch("jobtracker.ingest.requests.get", _fake_get({url: (None, html, None)})):
+        job = ingest_url(url, snapshot_store=store)
+    assert job["company"] == "Acme Labs Careers"
+    print("PASS test_ingest_generic_page_with_real_sitename_is_kept")
+
+
+# --------------------------------------------------------------------------- #
+# Finding D: a thin-content snapshot's raw HTML must survive a later paste    #
+# save for the SAME url (the documented recovery path), not get blanked.      #
+# --------------------------------------------------------------------------- #
+def test_thin_snapshot_survives_later_paste_save():
+    tmp = Path(tempfile.mkdtemp(prefix="jt_snap_")) / "vacancy_snapshots.json"
+    store = LocalJSONSnapshotStore(str(tmp))
+    url = "https://spa-example.com/careers/1"
+    store.save(url, job_id="", platform="thin", raw_source="<html>shell</html>",
+              extracted_text="")
+    store.save(url, job_id="ingest:abc", platform="paste", raw_source="",
+              extracted_text="pasted text")
+    row = store.get(url)
+    assert row["raw_source"] == "<html>shell</html>"  # not wiped by the empty paste save
+    assert row["extracted_text"] == "pasted text"      # the new non-empty value DID apply
+    assert row["platform"] == "paste"                  # non-empty fields still update normally
+    print("PASS test_thin_snapshot_survives_later_paste_save")
+
+
+# --------------------------------------------------------------------------- #
+# Findings G, H: direct unit coverage for the two heuristics                  #
+# --------------------------------------------------------------------------- #
+def test_company_from_domain_handles_second_level_suffixes():
+    assert _company_from_domain("https://www.jobs.ox.ac.uk/vacancy/1") == "Ox"
+    assert _company_from_domain("https://careers.acme.co.uk/role/1") == "Acme"
+    assert _company_from_domain("https://acme.io/careers/1") == "Acme"
+    print("PASS test_company_from_domain_handles_second_level_suffixes")
+
+
+def test_clean_title_keeps_legitimate_dash_titles():
+    # A dash/em-dash tail that is neither boilerplate nor the company name
+    # must be kept -- these are real, especially in Dutch postings.
+    assert _clean_title("Data Engineer - Clinical Genomics", "Acme") == \
+        "Data Engineer - Clinical Genomics"
+    assert _clean_title("Senior Onderzoeker — afdeling Genomics", "UMC Utrecht") == \
+        "Senior Onderzoeker — afdeling Genomics"
+    print("PASS test_clean_title_keeps_legitimate_dash_titles")
+
+
+def test_clean_title_strips_boilerplate_or_company_tail():
+    assert _clean_title("Data Engineer - Careers | Acme", "Acme") == "Data Engineer"
+    assert _clean_title("Role Title | Acme Careers", "Acme") == "Role Title"
+    assert _clean_title("Backend Developer - Werken bij Acme", "Acme") == "Backend Developer"
+    print("PASS test_clean_title_strips_boilerplate_or_company_tail")
 
 
 # --------------------------------------------------------------------------- #
@@ -367,6 +472,14 @@ if __name__ == "__main__":
     test_ingest_pasted_text_takes_precedence_over_url()
     test_ingest_thin_content_raises_and_still_saves_snapshot()
     test_ingest_requires_url_or_paste()
+    test_ingest_pasted_text_fills_company_and_title_from_url()
+    test_ingest_pasted_text_without_url_has_no_company()
+    test_ingest_generic_page_www_prefix_no_sitename_uses_domain_fallback()
+    test_ingest_generic_page_with_real_sitename_is_kept()
+    test_thin_snapshot_survives_later_paste_save()
+    test_company_from_domain_handles_second_level_suffixes()
+    test_clean_title_keeps_legitimate_dash_titles()
+    test_clean_title_strips_boilerplate_or_company_tail()
     test_snapshot_id_normalizes_host_case_only()
     test_snapshot_survives_posting_removed()
     print("\nAll ingest tests passed.")

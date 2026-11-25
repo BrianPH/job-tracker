@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _seed_store(path: Path):
@@ -80,6 +81,43 @@ def main():
 
     assert "Herscoor alles" in client.get("/").text
     print("PASS rescore button present")
+
+    # --- /ingest: generate a CV + brief from a bare URL or pasted text --- #
+    r = client.get("/ingest")
+    assert r.status_code == 200 and "Vacature-URL" in r.text
+    print("PASS ingest form renders")
+
+    r = client.post("/ingest", data={"url": "", "paste_text": ""}, follow_redirects=True)
+    assert r.status_code == 200
+    assert "URL of" in r.text or "vereist" in r.text.lower() or "required" in r.text.lower()
+    print("PASS ingest with neither url nor paste shows the input-error message")
+
+    # A schemeless URL ("acme.com/careers/1", no "https://") raises
+    # requests.exceptions.MissingSchema, which also subclasses ValueError --
+    # this must land in the generic/sanitized branch, not be reflected as the
+    # raw library message (the bug finding C described).
+    r = client.post("/ingest", data={"url": "acme.com/careers/1", "paste_text": ""},
+                    follow_redirects=True)
+    assert r.status_code == 200
+    assert "MissingSchema" not in r.text and "Invalid URL" not in r.text
+    assert "mislukt" in r.text.lower()
+    print("PASS ingest schemeless url does not leak the raw requests exception text")
+
+    fake_job = {"job_id": "ingest:abc123", "title": "Data Engineer", "company": "Acme",
+               "source": "Ingested", "url": "https://acme.example/careers/1",
+               "description": "Build things.", "location": "", "remote": False,
+               "salary": "", "posted_date": "", "status": "New", "fit_score": None,
+               "fit_reason": "", "fit_persona": ""}
+    with patch("jobtracker.webapp.ingest_url", lambda url, paste_text=None: fake_job), \
+         patch("jobtracker.webapp._generate_worker",
+              lambda job_id, job: webapp.GENERATION.update(
+                  {job_id: {"state": "done", "files": [], "llm_used": False, "lang": "en"}})):
+        r = client.post("/ingest", data={"url": "https://acme.example/careers/1",
+                                         "paste_text": ""}, follow_redirects=True)
+    assert r.status_code == 200
+    assert "Data Engineer" in r.text and "Acme" in r.text
+    assert webapp.ADHOC_JOBS.get("ingest:abc123") == fake_job
+    print("PASS ingest success path shows the generated job and stores it in ADHOC_JOBS")
 
     print("\nAll webapp tests passed.")
 
