@@ -708,7 +708,7 @@ def parse_werkenvoornederland_card(section, company: str) -> Job:
 # instead, and split the budget between them, so requirements always
 # survives.
 WVN_DUTIES_CHARS = 2400
-WVN_REQUIREMENTS_CHARS = 1599  # + 1 joining space = 4000, matching generator.GEN_DESC_CHARS exactly
+WVN_REQUIREMENTS_CHARS = 1599  # + 1 joining space = 4000, matching tailor.VACANCY_DESC_CHARS exactly
 
 
 def _wvn_section_text(soup, anchor_id: str) -> str:

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from jobtracker.generation_schema import AnalysisResult, TailorResult
 from jobtracker.tailor import (
+    VACANCY_DESC_CHARS,
     CreditBalanceError,
     GenerationTruncatedError,
     GenerationUnavailableError,
@@ -214,6 +215,30 @@ def test_tailor_application_valid_response():
     assert "Data Engineer" in kwargs["messages"][0]["content"]
     assert "example-university" in kwargs["messages"][0]["content"]  # education ids too
     print("PASS test_tailor_application_valid_response")
+
+
+def test_analyse_vacancy_caps_vacancy_text_at_desc_chars():
+    long_text = ("Relevant requirement near the end. " * 200)
+    assert len(long_text) > VACANCY_DESC_CHARS
+    client = _FakeClient(_FakeResponse(AnalysisResult(language="en")))
+    analyse_vacancy(long_text, client=client)
+    prompt = client.captured[0]["messages"][0]["content"]
+    assert long_text not in prompt
+    assert long_text[:VACANCY_DESC_CHARS] in prompt
+    print("PASS test_analyse_vacancy_caps_vacancy_text_at_desc_chars")
+
+
+def test_tailor_application_caps_description_at_desc_chars():
+    long_description = "x" * (VACANCY_DESC_CHARS * 2)
+    client = _FakeClient(_FakeResponse(_sample_tailor_result()))
+    job = {"title": "Data Engineer", "company": "Acme", "description": long_description}
+    analysis = AnalysisResult(language="en")
+    tailor_application(job, analysis, CANDIDATE, client=client)
+    prompt = client.captured[0]["messages"][0]["content"]
+    assert long_description not in prompt
+    assert ("x" * VACANCY_DESC_CHARS) in prompt
+    assert ("x" * (VACANCY_DESC_CHARS + 1)) not in prompt
+    print("PASS test_tailor_application_caps_description_at_desc_chars")
 
 
 def test_allowed_terms_includes_company_and_keywords():
@@ -442,6 +467,8 @@ if __name__ == "__main__":
     test_make_client_accepts_auth_token()
     test_allowed_terms_includes_company_and_keywords()
     test_allowed_terms_skips_missing_company()
+    test_analyse_vacancy_caps_vacancy_text_at_desc_chars()
+    test_tailor_application_caps_description_at_desc_chars()
     test_tailor_application_includes_retry_errors_in_prompt()
     test_parse_or_raise_translates_payment_required_to_credit_balance_error()
     test_parse_or_raise_does_not_misclassify_an_ordinary_bad_request_error()

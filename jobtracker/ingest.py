@@ -364,7 +364,7 @@ def _job_from_text(url: str, title: str, company: str, description: str, source:
 # --------------------------------------------------------------------------- #
 def ingest_url(url: str, paste_text: Optional[str] = None, snapshot_store=None) -> dict:
     """Ingest one vacancy and return a Job-shaped dict ready for
-    generator.generate_application(). Writes a vacancy_snapshots row on every
+    generation.generate_or_handoff(). Writes a vacancy_snapshots row on every
     attempt, successful or not (a thin-content failure still saves the raw
     HTML, in case a human wants to look at it later) — except when neither a
     URL nor pasted text is given, which raises before any attempt is made."""

@@ -1,8 +1,7 @@
 """Issue #10: two-step analyse -> tailor pipeline via the Claude API.
 
-Will eventually replace the single "write a profile paragraph" call
-(generator.py) -- not wired in yet, see the README's "not yet wired into the
-web UI" note -- with:
+Orchestrated by jobtracker/generation.py (issue #11/M3b), which
+jobtracker/webapp.py calls as its only generation entry point:
   1. analyse_vacancy -- Haiku (ANTHROPIC_MODEL_EXTRACT), extracts requirements/
      keywords/language/contact/deadline/application requirements from the
      vacancy text.
@@ -31,8 +30,17 @@ from typing import List, Optional, Tuple
 
 from pydantic import ValidationError
 
-from .generation_schema import AnalysisResult, TailorResult
+from .generation_schema import AnalysisResult, TailorResult, validate_tailor_result
 from .scorer import ANTHROPIC_MODEL_EXTRACT, ANTHROPIC_MODEL_WRITE
+
+# Only the generic `html` adapter caps description length on its own (at
+# 4000 chars, jobtracker/adapters.py); JSON-API adapters and ingest.py pass
+# descriptions through uncapped. Cap here too, at the same size (matching
+# the WVN_DUTIES_CHARS/WVN_REQUIREMENTS_CHARS split in adapters.py), so an
+# unusually long posting can't blow the model's context window or run up
+# Anthropic spend unbounded -- applied to both the analyse and tailor
+# prompts, since both embed the full vacancy description.
+VACANCY_DESC_CHARS = 4000
 
 ANALYSE_MAX_TOKENS = 1024
 # Sonnet 5 runs adaptive thinking by default when `thinking` is omitted, and
@@ -233,7 +241,8 @@ def analyse_vacancy(vacancy_text: str, client=None, model: Optional[str] = None)
         model=model,
         max_tokens=ANALYSE_MAX_TOKENS,
         system=ANALYSE_SYSTEM,
-        messages=[{"role": "user", "content": f"VACANCY TEXT:\n{vacancy_text}"}],
+        messages=[{"role": "user",
+                   "content": f"VACANCY TEXT:\n{(vacancy_text or '')[:VACANCY_DESC_CHARS]}"}],
         output_format=AnalysisResult,
     )
     if response.stop_reason == "max_tokens":
@@ -262,7 +271,7 @@ def tailor_application(job: dict, analysis: AnalysisResult, candidate: dict,
     user = (
         f"VACANCY:\nTitle: {job.get('title','')}\nCompany: {job.get('company','')}\n"
         f"Location: {job.get('location','')}\n"
-        f"Description: {job.get('description','')}\n\n"
+        f"Description: {(job.get('description') or '')[:VACANCY_DESC_CHARS]}\n\n"
         f"ANALYSIS:\nRequirements: {', '.join(analysis.requirements)}\n"
         f"Keywords: {', '.join(analysis.keywords)}\n\n"
         f"BULLET BANK (role id / bullet id -- select and order from these ONLY):\n"
@@ -307,7 +316,6 @@ def run_tailor_pipeline(job: dict, analysis: AnalysisResult, candidate: dict,
     same as any other unrecovered failure -- this function itself never
     raises on a validation failure, only on an SDK/truncation error from
     `tailor_application`."""
-    from .generation_schema import validate_tailor_result
     client = client if client is not None else make_client()
 
     result = tailor_application(job, analysis, candidate, style_example,
