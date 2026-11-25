@@ -1,4 +1,4 @@
-"""Phase 6: per-vacancy CV + motivation letter generation (.docx).
+"""Phase 6 / issue #9: per-vacancy CV + motivation letter generation (.docx).
 
 Design principle: the LLM never invents facts. Experience, education, skills and
 personal details come verbatim from config/candidate.yaml and are rendered
@@ -7,6 +7,19 @@ those facts:
   1. a tailored CV profile paragraph, and
   2. the motivation-letter body (style-guided by the examples in Solliciteren/).
 
+candidate.yaml schema: each `experience` entry has a stable `id` and a list of
+`bullets`, each `{id, tags, nl, en}` -- a bullet bank, not flat bullets_nl/
+bullets_en lists. A future tailoring step selects/orders bullet ids; it never
+writes bullet text, keeping the tailored CV verifiable against these facts.
+Fields with an `_en` suffix (title_en, period_en, degree_en, ...) are the
+English counterpart of the plain field, with the plain field as fallback.
+
+Rendering uses docxtpl against Jinja-tagged .docx templates in
+config/templates/ (cv_nl.docx, cv_en.docx, letter_nl.docx, letter_en.docx),
+not a layout built in Python -- so the templates can be your own Word design.
+This repo ships a minimal placeholder design; swapping in a real one is a
+file replacement, no code change.
+
 Language: Dutch or English, auto-detected from the vacancy text (overridable).
 Backend: GENERATOR_BACKEND (local Ollama by default; independent of the scorer's
 LLM_BACKEND, so switching generation to Anthropic doesn't move scoring off the
@@ -14,7 +27,7 @@ free local backend), requested in plain-text mode. Without a configured/reachabl
 LLM the generator falls back to the static profile summary + a solid template
 letter, so it always produces documents.
 
-Output: applications/<Company>_<Title>/CV_Brian_Haubrich.docx + letter .docx.
+Output: applications/<Company>_<Title>/CV_<name>.docx + letter .docx.
 """
 from __future__ import annotations
 
@@ -30,6 +43,10 @@ CANDIDATE_PATH = ROOT / "config" / "candidate.yaml"
 PROFILE_PATH = ROOT / "config" / "profile.yaml"
 EXAMPLES_DIR = ROOT / "Solliciteren"
 OUTPUT_DIR = ROOT / "applications"
+TEMPLATES_DIR = ROOT / "config" / "templates"
+CV_TEMPLATE_PATHS = {"nl": TEMPLATES_DIR / "cv_nl.docx", "en": TEMPLATES_DIR / "cv_en.docx"}
+LETTER_TEMPLATE_PATHS = {"nl": TEMPLATES_DIR / "letter_nl.docx",
+                        "en": TEMPLATES_DIR / "letter_en.docx"}
 
 # Only the generic `html` adapter caps description length (at 4000 chars,
 # jobtracker/adapters.py); JSON-API adapters (ashby, smartrecruiters,
@@ -46,7 +63,20 @@ DUTCH_MARKERS = (" en ", " het ", " een ", " wij ", " jij ", " je ", "ervaring",
 # Inputs                                                                       #
 # --------------------------------------------------------------------------- #
 def load_candidate(path: Path = CANDIDATE_PATH) -> dict:
+    if not path.exists():
+        path = ROOT / "config" / "candidate.example.yaml"
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _lang_field(d: dict, field: str, lang: str) -> str:
+    """`{field}_en` when rendering English and present, else the plain field."""
+    if lang == "en":
+        return d.get(f"{field}_en") or d.get(field, "")
+    return d.get(field, "")
+
+
+def _bullet_text(bullet: dict, lang: str) -> str:
+    return bullet.get(lang) or bullet.get("nl") or bullet.get("en") or ""
 
 
 def load_profile(path: Path = PROFILE_PATH) -> dict:
@@ -89,14 +119,13 @@ def _facts_block(candidate: dict, profile: dict, lang: str) -> str:
     p = candidate.get("personal", {})
     exp_lines = []
     for e in candidate.get("experience", []):
-        title = e.get("title" if lang == "nl" else "title_en") or e.get("title", "")
-        period = e.get("period" if lang == "nl" else "period_en") or e.get("period", "")
-        bullets = e.get(f"bullets_{lang}") or e.get("bullets_nl") or []
+        title = _lang_field(e, "title", lang)
+        period = _lang_field(e, "period", lang)
+        bullets = [_bullet_text(b, lang) for b in e.get("bullets", []) if _bullet_text(b, lang)]
         exp_lines.append(f"- {title} @ {e.get('company','')} ({period}): " + " ".join(bullets))
     edu_lines = [
-        f"- {e.get('degree' if lang == 'nl' else 'degree_en') or e.get('degree','')}, "
-        f"{e.get('school' if lang == 'nl' else 'school_en') or e.get('school','')} "
-        f"({e.get('period' if lang == 'nl' else 'period_en') or e.get('period','')})"
+        f"- {_lang_field(e, 'degree', lang)}, {_lang_field(e, 'school', lang)} "
+        f"({_lang_field(e, 'period', lang)})"
         for e in candidate.get("education", [])
     ]
     skills = ", ".join(s.get("name", "") for s in candidate.get("skills", []))
@@ -184,141 +213,132 @@ def generate_cv_summary(job: dict, candidate: dict, profile: dict, lang: str,
 
 
 def _template_letter_body(job: dict, candidate: dict, lang: str) -> str:
-    """LLM-free fallback: a solid generic body built from real facts."""
-    name_company = job.get("company", "")
+    """LLM-free fallback: a solid generic body built entirely from candidate.yaml
+    facts -- no hardcoded employer/project names, so it stays correct for
+    whatever candidate.yaml (or candidate.example.yaml) is actually loaded."""
     title = job.get("title", "")
+    company = job.get("company", "")
+    roles = candidate.get("experience") or []
+    skills = [s.get("name", "") for s in candidate.get("skills", []) if s.get("name")]
+    skills_text = ", ".join(skills[:6])
+    # candidate.yaml's `highlights` has no `_en` variant (unlike bullets/titles/
+    # periods), so it's only safe to use for an nl letter -- don't leak
+    # untranslated Dutch text into an English fallback.
+    highlight = next(iter(candidate.get("highlights") or []), "") if lang == "nl" else ""
+
+    def role_sentence(role: dict) -> str:
+        rtitle = _lang_field(role, "title", lang)
+        rcompany = role.get("company", "")
+        bullets = role.get("bullets") or []
+        bullet = _bullet_text(bullets[0], lang) if bullets else ""
+        if not rcompany:
+            return ""
+        if lang == "nl":
+            s = f"Bij {rcompany} werkte ik als {rtitle}."
+        else:
+            s = f"At {rcompany}, I worked as {rtitle}."
+        return f"{s} {bullet}".strip()
+
+    role_sentences = [s for s in (role_sentence(r) for r in roles[:2]) if s]
+
     if lang == "nl":
-        return (
-            f"Met enthousiasme solliciteer ik naar de functie van {title} bij {name_company}. "
-            "Als informatica-afgestudeerde met ervaring in softwareontwikkeling met Python en "
-            "C#/.NET, SQL-databases (PostgreSQL, SQL Server), Docker, Azure/AWS en CI/CD-pipelines, "
-            "sluit deze rol goed aan bij mijn achtergrond en ambities.\n\n"
-            "Tijdens mijn stages bij Quintor en Depot Software heb ik een sterke basis gelegd in "
-            "modern software-ontwerp, versiebeheer en agile werken. Momenteel werk ik als Project "
-            "Manager bij Ridder Growing Solutions, waar ik technische projecten coördineer en "
-            "requirements afstem met uiteenlopende stakeholders.\n\n"
-            "Mijn langetermijnambitie ligt op het snijvlak van IT en life sciences, met de intentie "
-            "om een master bio-informatica te volgen. Ik verdiep mij al zelfstandig in algoritmische "
-            "bio-informatica, zoals Hamming-afstanden voor DNA-foutcorrectie en RNA-structuuranalyse.\n\n"
-            "Graag licht ik mijn motivatie en CV toe in een persoonlijk gesprek."
-        )
-    return (
-        f"I am writing to apply for the position of {title} at {name_company}. As a Computer "
-        "Science graduate with hands-on experience in Python and C#/.NET development, SQL databases "
-        "(PostgreSQL, SQL Server), Docker, Azure/AWS and CI/CD pipelines, this role aligns well "
-        "with my background and ambitions.\n\n"
-        "During my internships at Quintor and Depot Software I built a strong foundation in modern "
-        "software design, version control and agile development. I currently work as a Project "
-        "Manager at Ridder Growing Solutions, coordinating technical projects and aligning "
-        "requirements with diverse stakeholders.\n\n"
-        "My long-term ambition lies at the intersection of IT and life sciences, with plans to "
-        "pursue a Master's in Bioinformatics. I am already exploring the field independently "
-        "through algorithmic challenges such as Hamming distances for DNA error correction and "
-        "RNA structure analysis.\n\n"
-        "I would welcome the opportunity to discuss my motivation and CV in a personal interview."
+        opening = f"Met enthousiasme solliciteer ik naar de functie van {title} bij {company}."
+        if skills_text:
+            opening += f" Mijn ervaring met {skills_text} sluit goed aan bij deze rol."
+        closing = "Graag licht ik mijn motivatie en CV toe in een persoonlijk gesprek."
+    else:
+        opening = f"I am writing to apply for the position of {title} at {company}."
+        if skills_text:
+            opening += f" My experience with {skills_text} aligns well with this role."
+        closing = "I would welcome the opportunity to discuss my motivation and CV in a personal interview."
+
+    paragraphs = [opening, *role_sentences]
+    if highlight:
+        paragraphs.append(highlight)
+    paragraphs.append(closing)
+    return "\n\n".join(paragraphs)
+
+
+# --------------------------------------------------------------------------- #
+# .docx rendering via docxtpl -- the LAYOUT lives in config/templates/*.docx,  #
+# not in this code, so it can be your own Word design (issue #9). Each        #
+# render context below is plain data; see config/templates/ for the Jinja     #
+# tags each template expects.                                                 #
+# --------------------------------------------------------------------------- #
+LETTER_LABELS = {
+    "nl": {"subject_prefix": "Betreft: sollicitatie ", "salutation": "Geachte heer of mevrouw,",
+          "closing": "Met vriendelijke groet,", "date_fmt": "%d-%m-%Y"},
+    "en": {"subject_prefix": "Re: Application for ", "closing": "Sincerely,",
+          "date_fmt": "%B %d, %Y"},
+}
+
+
+def cv_render_context(candidate: dict, summary: str, lang: str) -> dict:
+    p = candidate.get("personal", {})
+    experience = []
+    for e in candidate.get("experience", []):
+        bullets = [_bullet_text(b, lang) for b in e.get("bullets", []) if _bullet_text(b, lang)]
+        experience.append({
+            "title": _lang_field(e, "title", lang),
+            "company": e.get("company", ""),
+            "period": _lang_field(e, "period", lang),
+            "bullets_line": " • ".join(bullets),
+        })
+    education = [{
+        "degree": _lang_field(e, "degree", lang),
+        "school": _lang_field(e, "school", lang),
+        "period": _lang_field(e, "period", lang),
+    } for e in candidate.get("education", [])]
+    skills_line = ", ".join(
+        f"{s.get('name','')} ({_lang_field(s, 'level', lang)})" if _lang_field(s, "level", lang)
+        else s.get("name", "")
+        for s in candidate.get("skills", []) if s.get("name")
     )
+    languages_line = ", ".join(
+        f"{_lang_field(lg, 'name', lang)} ({_lang_field(lg, 'level', lang)})"
+        for lg in candidate.get("languages", []) if _lang_field(lg, "name", lang)
+    )
+    return {
+        "name": p.get("name", ""), "address": p.get("address", ""),
+        "email": p.get("email", ""), "phone": p.get("phone", ""),
+        "profile": summary,
+        "experience": experience,
+        "education": education,
+        "skills_line": skills_line,
+        "languages_line": languages_line,
+    }
 
 
-# --------------------------------------------------------------------------- #
-# .docx rendering                                                              #
-# --------------------------------------------------------------------------- #
-def _base_doc():
-    import docx
-    from docx.shared import Pt
-    doc = docx.Document()
-    style = doc.styles["Normal"]
-    style.font.name = "Calibri"
-    style.font.size = Pt(10.5)
-    return doc
-
-
-def _heading(doc, text: str, size: int = 13):
-    from docx.shared import Pt, RGBColor
-    p = doc.add_paragraph()
-    run = p.add_run(text.upper())
-    run.bold = True
-    run.font.size = Pt(size)
-    run.font.color.rgb = RGBColor(0x1F, 0x4E, 0x79)
-    return p
+def letter_render_context(candidate: dict, job: dict, body: str, lang: str) -> dict:
+    p = candidate.get("personal", {})
+    labels = LETTER_LABELS[lang]
+    salutation = labels["salutation"] if lang == "nl" else f"Dear {job.get('company','')} team,"
+    body_paragraphs = [b.strip() for b in body.split("\n") if b.strip()]
+    return {
+        "name": p.get("name", ""), "email": p.get("email", ""), "phone": p.get("phone", ""),
+        "date_line": datetime.date.today().strftime(labels["date_fmt"]),
+        "subject_line": f"{labels['subject_prefix']}{job.get('title','')} — {job.get('company','')}",
+        "salutation": salutation,
+        "body_paragraphs": body_paragraphs,
+        "closing": labels["closing"],
+    }
 
 
 def build_cv_docx(candidate: dict, summary: str, lang: str, path: Path) -> Path:
-    from docx.shared import Pt
-    doc = _base_doc()
-    p = candidate.get("personal", {})
-
-    name_p = doc.add_paragraph()
-    run = name_p.add_run(p.get("name", ""))
-    run.bold = True
-    run.font.size = Pt(20)
-    doc.add_paragraph(f"{p.get('address','')}  |  {p.get('email','')}  |  {p.get('phone','')}")
-
-    _heading(doc, "Profiel" if lang == "nl" else "Profile")
-    doc.add_paragraph(summary)
-
-    _heading(doc, "Werkervaring" if lang == "nl" else "Work Experience")
-    for e in candidate.get("experience", []):
-        title = e.get("title" if lang == "nl" else "title_en") or e.get("title", "")
-        period = e.get("period" if lang == "nl" else "period_en") or e.get("period", "")
-        head = doc.add_paragraph()
-        r = head.add_run(f"{title} — {e.get('company','')}")
-        r.bold = True
-        head.add_run(f"   ({period})").italic = True
-        for b in e.get(f"bullets_{lang}") or e.get("bullets_nl") or []:
-            doc.add_paragraph(b, style="List Bullet")
-
-    _heading(doc, "Opleiding" if lang == "nl" else "Education")
-    for e in candidate.get("education", []):
-        degree = e.get("degree" if lang == "nl" else "degree_en") or e.get("degree", "")
-        school = e.get("school" if lang == "nl" else "school_en") or e.get("school", "")
-        period = e.get("period" if lang == "nl" else "period_en") or e.get("period", "")
-        line = doc.add_paragraph()
-        line.add_run(f"{degree} — {school}").bold = True
-        line.add_run(f"   ({period})").italic = True
-
-    _heading(doc, "Vaardigheden" if lang == "nl" else "Skills")
-    for s in candidate.get("skills", []):
-        lvl = s.get("level" if lang == "nl" else "level_en") or s.get("level", "")
-        doc.add_paragraph(f"{s.get('name','')} — {lvl}", style="List Bullet")
-
-    _heading(doc, "Talen" if lang == "nl" else "Languages")
-    for l in candidate.get("languages", []):
-        nm = l.get("name" if lang == "nl" else "name_en") or l.get("name", "")
-        lvl = l.get("level" if lang == "nl" else "level_en") or l.get("level", "")
-        doc.add_paragraph(f"{nm} — {lvl}", style="List Bullet")
-
+    from docxtpl import DocxTemplate
+    template = CV_TEMPLATE_PATHS.get(lang, CV_TEMPLATE_PATHS["en"])
+    doc = DocxTemplate(str(template))
+    doc.render(cv_render_context(candidate, summary, lang))
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))
     return path
 
 
 def build_letter_docx(candidate: dict, job: dict, body: str, lang: str, path: Path) -> Path:
-    from docx.shared import Pt
-    doc = _base_doc()
-    p = candidate.get("personal", {})
-
-    name_p = doc.add_paragraph()
-    r = name_p.add_run(p.get("name", ""))
-    r.bold = True
-    r.font.size = Pt(14)
-    doc.add_paragraph(f"{p.get('email','')}  |  {p.get('phone','')}")
-    today = datetime.date.today()
-    doc.add_paragraph(today.strftime("%d-%m-%Y") if lang == "nl" else today.strftime("%B %d, %Y"))
-    doc.add_paragraph("")
-
-    subject = doc.add_paragraph()
-    label = "Betreft: sollicitatie " if lang == "nl" else "Re: Application for "
-    subject.add_run(f"{label}{job.get('title','')} — {job.get('company','')}").bold = True
-    doc.add_paragraph("")
-
-    doc.add_paragraph("Geachte heer of mevrouw," if lang == "nl" else f"Dear {job.get('company','')} team,")
-    doc.add_paragraph("")
-    for para in [b for b in body.split("\n") if b.strip()]:
-        doc.add_paragraph(para.strip())
-    doc.add_paragraph("")
-    doc.add_paragraph("Met vriendelijke groet," if lang == "nl" else "Sincerely,")
-    doc.add_paragraph(p.get("name", ""))
-
+    from docxtpl import DocxTemplate
+    template = LETTER_TEMPLATE_PATHS.get(lang, LETTER_TEMPLATE_PATHS["en"])
+    doc = DocxTemplate(str(template))
+    doc.render(letter_render_context(candidate, job, body, lang))
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))
     return path
@@ -351,10 +371,11 @@ def generate_application(job: dict, out_dir: Path = OUTPUT_DIR,
     summary = generate_cv_summary(job, candidate, profile, lang, caller)
     body = generate_letter_body(job, candidate, profile, lang, caller)
 
+    name_slug = _safe((candidate.get("personal", {}) or {}).get("name", ""), max_len=30)
     folder = out_dir / f"{_safe(job.get('company',''))}_{_safe(job.get('title',''))}"
     cv_path = build_cv_docx(candidate, summary, lang,
-                            folder / ("CV_Brian_Haubrich.docx" if lang == "nl"
-                                      else "Resume_Brian_Haubrich.docx"))
+                            folder / (f"CV_{name_slug}.docx" if lang == "nl"
+                                      else f"Resume_{name_slug}.docx"))
     letter_path = build_letter_docx(candidate, job, body, lang,
                                     folder / ("Motivatiebrief.docx" if lang == "nl"
                                               else "Cover_Letter.docx"))
