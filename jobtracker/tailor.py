@@ -27,7 +27,7 @@ monkeypatching the SDK.
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from pydantic import ValidationError
 
@@ -49,6 +49,18 @@ class GenerationUnavailableError(RuntimeError):
     """No reachable Anthropic client -- neither ANTHROPIC_API_KEY nor
     ANTHROPIC_AUTH_TOKEN is set. The caller falls back to the JSON handoff
     (issue #11), not handled here."""
+
+
+class CreditBalanceError(RuntimeError):
+    """The account has run out of API credit -- `anthropic.PaymentRequiredError`
+    (HTTP 402). Raised instead of letting the SDK exception propagate so
+    jobtracker/generation.py's handoff path can tell a human "top up and
+    retry" apart from a generic API failure. Earlier drafts of this feature
+    planned to detect this by matching "credit balance" in the error
+    message, but the SDK's own `APIStatusError.api_message` docstring now
+    says "Its wording can change, so don't match on it" and exposes a
+    dedicated 402 exception type instead -- used here rather than text
+    matching."""
 
 
 class GenerationTruncatedError(RuntimeError):
@@ -83,9 +95,12 @@ def make_client():
     if not key and not auth_token:
         return None
     import anthropic
+    # Rate-limit/overloaded/network failures are retried by the SDK itself
+    # (issue #11/M3b) rather than hand-rolled here -- only a failure that
+    # survives these retries reaches the JSON handoff.
     if key:
-        return anthropic.Anthropic(api_key=key)
-    return anthropic.Anthropic(auth_token=auth_token)
+        return anthropic.Anthropic(api_key=key, max_retries=3)
+    return anthropic.Anthropic(auth_token=auth_token, max_retries=3)
 
 
 def _parse_or_raise(client, **kwargs):
@@ -93,11 +108,19 @@ def _parse_or_raise(client, **kwargs):
     incomplete JSON, which fails Pydantic validation inside the SDK before
     it ever returns -- translate that into GenerationTruncatedError so
     callers have one error to handle instead of needing to know this SDK
-    detail. Any other exception (network, auth, rate limit) propagates
-    unchanged; callers are expected to catch anthropic's own exception
-    types (e.g. APIConnectionError, APIStatusError) for those."""
+    detail. `anthropic.PaymentRequiredError` (402, no credit left) is
+    translated into CreditBalanceError so the handoff path (issue #11) can
+    tag that case distinctly. Any other exception (network, auth, rate
+    limit) propagates unchanged; callers are expected to catch anthropic's
+    own exception types (e.g. APIConnectionError, AuthenticationError) for
+    those -- the SDK's own max_retries (see make_client) already absorbs
+    rate-limit/overloaded/network failures before they get here."""
+    import anthropic
     try:
         return client.messages.parse(**kwargs)
+    except anthropic.PaymentRequiredError as e:
+        raise CreditBalanceError(
+            f"Anthropic account has no API credit left (model {kwargs.get('model')}).") from e
     except ValidationError as e:
         raise GenerationTruncatedError(
             f"Reply did not parse against the schema -- truncated at "
@@ -221,11 +244,15 @@ def analyse_vacancy(vacancy_text: str, client=None, model: Optional[str] = None)
 
 def tailor_application(job: dict, analysis: AnalysisResult, candidate: dict,
                        style_example: str = "", client=None,
-                       model: Optional[str] = None) -> TailorResult:
+                       model: Optional[str] = None,
+                       retry_errors: Optional[List[str]] = None) -> TailorResult:
     """Sonnet call: analysis + bullet bank + style example -> structured
     TailorResult. `style_example` is prior letters by the same candidate
     (e.g. generator.example_letter_text(analysis.language)) -- optional
-    since not every checkout has one."""
+    since not every checkout has one. `retry_errors` (issue #11/M3b) is
+    `generation_schema.validate_tailor_result`'s blocking-error list from a
+    PRIOR call against this same vacancy -- appended to the prompt so the
+    model can see exactly which ids it got wrong, rather than retrying blind."""
     client = client if client is not None else make_client()
     if client is None:
         raise GenerationUnavailableError("No Anthropic client available (ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN both unset).")
@@ -246,6 +273,12 @@ def tailor_application(job: dict, analysis: AnalysisResult, candidate: dict,
         f"STYLE EXAMPLE (previous letters by the same candidate):\n{style_example}\n\n"
         f"Write the tailored CV/letter result now, in {_lang_name(lang)}."
     )
+    if retry_errors:
+        user += (
+            "\n\nYour previous reply failed validation for these reasons -- "
+            "fix them, using only ids/names from the lists above:\n" +
+            "\n".join(f"- {e}" for e in retry_errors)
+        )
     system = TAILOR_SYSTEM.replace("{language}", _lang_name(lang))
 
     response = _parse_or_raise(
@@ -260,6 +293,31 @@ def tailor_application(job: dict, analysis: AnalysisResult, candidate: dict,
         raise GenerationTruncatedError(
             f"Tailor reply truncated at max_tokens={TAILOR_MAX_TOKENS} (model {model}).")
     return response.parsed_output
+
+
+def run_tailor_pipeline(job: dict, analysis: AnalysisResult, candidate: dict,
+                        style_example: str = "", client=None,
+                        model: Optional[str] = None) -> Tuple[TailorResult, List[str]]:
+    """issue #11/M3b: `tailor_application` plus ONE retry when the reply is
+    structurally valid JSON but fails `generation_schema.validate_tailor_result`
+    (an id that doesn't exist in candidate.yaml) -- a different failure mode
+    from GenerationTruncatedError, which only covers incomplete/schema-invalid
+    JSON. Returns (result, remaining_errors); a non-empty second element
+    means the caller should treat this as a failed generation (JSON handoff),
+    same as any other unrecovered failure -- this function itself never
+    raises on a validation failure, only on an SDK/truncation error from
+    `tailor_application`."""
+    from .generation_schema import validate_tailor_result
+    client = client if client is not None else make_client()
+
+    result = tailor_application(job, analysis, candidate, style_example,
+                                client=client, model=model)
+    errors = validate_tailor_result(result, candidate)
+    if errors:
+        result = tailor_application(job, analysis, candidate, style_example,
+                                    client=client, model=model, retry_errors=errors)
+        errors = validate_tailor_result(result, candidate)
+    return result, errors
 
 
 def allowed_terms(job: dict, analysis: AnalysisResult) -> list:
