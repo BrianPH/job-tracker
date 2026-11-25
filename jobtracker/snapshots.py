@@ -53,6 +53,12 @@ class PostgresSnapshotStore:
 
     def save(self, url: str, job_id: str = "", platform: str = "",
              raw_source: str = "", extracted_text: str = "") -> dict:
+        # NULLIF(..., '') + COALESCE: an incoming EMPTY raw_source/extracted_text
+        # keeps whatever was already saved, rather than blanking it. This matters
+        # for the thin-content path, which saves the fetched raw HTML "in case a
+        # human wants to look at it later" -- without this, pasting the vacancy
+        # text afterwards (platform="paste", raw_source="") would silently wipe
+        # that raw HTML from the very row the paste is meant to complete.
         sid = snapshot_id(url)
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
@@ -61,7 +67,9 @@ class PostgresSnapshotStore:
                 "VALUES (%s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (snapshot_id) DO UPDATE SET "
                 "job_id = EXCLUDED.job_id, platform = EXCLUDED.platform, "
-                "raw_source = EXCLUDED.raw_source, extracted_text = EXCLUDED.extracted_text",
+                "raw_source = COALESCE(NULLIF(EXCLUDED.raw_source, ''), vacancy_snapshots.raw_source), "
+                "extracted_text = COALESCE(NULLIF(EXCLUDED.extracted_text, ''), "
+                "vacancy_snapshots.extracted_text)",
                 (sid, url, job_id, platform, raw_source, extracted_text),
             )
             conn.commit()
@@ -92,6 +100,13 @@ class LocalJSONSnapshotStore:
              raw_source: str = "", extracted_text: str = "") -> dict:
         sid = snapshot_id(url)
         data = self._load()
+        existing = data.get(sid) or {}
+        # Same empty-overwrite protection as PostgresSnapshotStore.save() -- see
+        # the comment there.
+        if not raw_source:
+            raw_source = existing.get("raw_source", "")
+        if not extracted_text:
+            extracted_text = existing.get("extracted_text", "")
         data[sid] = {
             "snapshot_id": sid, "url": url, "job_id": job_id, "platform": platform,
             "raw_source": raw_source, "extracted_text": extracted_text,
