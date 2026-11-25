@@ -1,25 +1,36 @@
-"""issue #11/M3b: orchestrates the analyse -> tailor pipeline
-(jobtracker/tailor.py, issue #10) for one job and renders the result via
-jobtracker/generator.py's docxtpl pieces -- or, on any unrecovered failure,
-writes a JSON handoff request instead of the silent template fallback the
-old generator.generate_application had.
+"""issue #11/M3b, extended by issue #12: orchestrates the analyse -> tailor
+pipeline (jobtracker/tailor.py, issue #10) for one job.
 
-jobtracker/webapp.py calls generate_or_handoff() as its ONLY generation
-entry point. apply_handoff_upload() is the other side of the handoff: a
-human ran .claude/commands/tailor.md (or pasted request.json into
-claude.ai) and uploads the resulting generation.json.
+generate_or_handoff() and apply_handoff_upload() produce a DRAFT -- a
+TailorResult plus enough context (analysis, candidate, style_example) to
+regenerate it -- for a human to review before anything is written to disk.
+Neither renders a document directly: "nothing is sent to an employer
+unseen" (issue #12) means a review step always sits between generation and
+the final .docx. jobtracker/webapp.py stores the draft (its DRAFTS dict)
+and exposes it on a review page; regenerate() re-runs just the tailor step
+against edits/a fresh attempt, and render_draft() is the only function in
+this module that actually writes .docx files, applying whatever the review
+page's edits (profile text, letter paragraphs, bullet selection) were.
+
+On any unrecovered API failure (no key, no credit, truncated/invalid reply),
+all three entry points write a JSON handoff request instead of guessing --
+see write_handoff_request below. apply_handoff_upload() is the other side
+of that handoff: a human ran .claude/commands/tailor.md (or pasted
+request.json into claude.ai) and uploads the resulting generation.json,
+which also becomes a draft rather than rendering directly, so the live and
+handoff paths land on the same review step.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import anthropic
 from pydantic import ValidationError
 
 from . import generator, tailor
-from .generation_schema import TailorResult, validate_tailor_result
+from .generation_schema import AnalysisResult, TailorResult, validate_tailor_result
 
 OUTPUT_DIR = generator.OUTPUT_DIR
 HANDOFF_STATUS = "Wacht op generatie"
@@ -133,9 +144,11 @@ def generate_or_handoff(job: dict, candidate: Optional[dict] = None,
                         out_dir: Path = OUTPUT_DIR, client=None,
                         set_status: Optional[Callable[[str], None]] = None) -> dict:
     """The ONLY generation entry point jobtracker/webapp.py calls. Returns
-    {"state": "done", "cv": Path, "letter": Path, "lang": str} on success,
-    or {"state": "handoff", "request_path": Path, "error": str} on any
-    unrecovered failure -- never renders a silent fallback document."""
+    a DRAFT on success -- {"state": "draft", "job":..., "candidate":...,
+    "analysis":..., "lang": str, "style_example": str, "result":
+    TailorResult} -- for review (issue #12), never a rendered document; or
+    {"state": "handoff", "request_path": Path, "error": str} on any
+    unrecovered failure."""
     candidate = candidate if candidate is not None else generator.load_candidate()
     lang_guess = generator.detect_language(f"{job.get('title','')} {job.get('description','')}")
 
@@ -164,7 +177,31 @@ def generate_or_handoff(job: dict, candidate: Optional[dict] = None,
         return {"state": "handoff", "request_path": path, "error": error_msg}
 
     _clear_handoff(job, candidate, analysis.language, out_dir, set_status)
-    return _render(candidate, result, job, analysis.language, out_dir)
+    return {"state": "draft", "job": job, "candidate": candidate, "analysis": analysis,
+           "lang": analysis.language, "style_example": style_example, "result": result}
+
+
+def _load_handoff_context(job: dict, candidate: dict, lang: str,
+                          out_dir: Path) -> Tuple[Optional[AnalysisResult], str]:
+    """Best-effort recovery of the AnalysisResult + style_example that were
+    recorded in request.json when the handoff was written, so a draft that
+    came from an upload can still use "Regenerate" (which needs the SAME
+    analysis, not a re-run of the analyse step -- issue #12's acceptance
+    criteria). Falls back to (None, "") if request.json is missing or
+    unreadable, or if the analyse step itself had failed before the
+    handoff was written (analysis is null in that case too) -- the upload
+    and render still work either way, "Regenerate" just isn't available
+    for that draft."""
+    path = _request_path(job, candidate, lang, out_dir)
+    if not path.is_file():
+        return None, ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, ""
+    analysis_data = payload.get("analysis")
+    analysis = AnalysisResult.model_validate(analysis_data) if analysis_data else None
+    return analysis, payload.get("style_example", "")
 
 
 def apply_handoff_upload(job: dict, generation_json: dict, candidate: Optional[dict] = None,
@@ -173,8 +210,9 @@ def apply_handoff_upload(job: dict, generation_json: dict, candidate: Optional[d
     """A human ran `.claude/commands/tailor.md` (or pasted request.json into
     claude.ai) and uploads the resulting generation.json -- a bare
     TailorResult JSON object, no wrapper. Goes through the EXACT SAME
-    validator as a live reply; on success this renders (same as
-    generate_or_handoff's success path) and restores whatever status the
+    validator as a live reply; on success this becomes a draft (same as
+    generate_or_handoff's success path -- issue #12: the live and handoff
+    paths land on the same review step) and restores whatever status the
     job had before the handoff. On failure it renders nothing and returns
     the validation errors -- never a partial/best-effort document."""
     candidate = candidate if candidate is not None else generator.load_candidate()
@@ -187,6 +225,53 @@ def apply_handoff_upload(job: dict, generation_json: dict, candidate: Optional[d
     if errors:
         return {"state": "invalid", "errors": errors}
 
-    rendered = _render(candidate, result, job, result.language, out_dir)
+    analysis, style_example = _load_handoff_context(job, candidate, result.language, out_dir)
     _clear_handoff(job, candidate, result.language, out_dir, set_status)
-    return rendered
+    return {"state": "draft", "job": job, "candidate": candidate, "analysis": analysis,
+           "lang": result.language, "style_example": style_example, "result": result}
+
+
+def regenerate(job: dict, analysis: AnalysisResult, candidate: dict, style_example: str = "",
+               out_dir: Path = OUTPUT_DIR, client=None,
+               set_status: Optional[Callable[[str], None]] = None) -> dict:
+    """issue #12: re-runs ONLY the tailor step -- the acceptance criteria's
+    "without re-running the ingest/analyse steps" -- a single
+    `tailor_application` call, no automatic validator-retry (confirmed
+    decision: a human is already about to review the output, so retrying
+    invisibly before they see anything isn't worth another API call).
+    Returns {"state": "draft", "result": TailorResult, "errors": [...]}
+    on a structural success; `errors` is ADVISORY here, for the review
+    page to show -- not a reason to discard the attempt, since the review
+    page's bullet checkboxes are drawn from the real bullet bank, so a
+    stale/invented id in the reply just doesn't show up checked rather
+    than crashing or needing to be rejected outright. Only an SDK-level
+    failure is treated as a real failure, written to the JSON handoff like
+    any other unrecovered one."""
+    client = client if client is not None else tailor.make_client()
+    try:
+        result = tailor.tailor_application(job, analysis, candidate, style_example, client=client)
+    except _HANDOFF_EXCEPTIONS as e:
+        path = write_handoff_request(job, candidate, analysis.language, str(e),
+                                     analysis=analysis, style_example=style_example,
+                                     out_dir=out_dir, set_status=set_status)
+        return {"state": "handoff", "request_path": path, "error": str(e)}
+    errors = validate_tailor_result(result, candidate)
+    return {"state": "draft", "result": result, "errors": errors}
+
+
+def render_draft(draft: dict, profile: str, letter_paragraphs: List[str],
+                 bullets: Dict[str, List[str]], out_dir: Path = OUTPUT_DIR) -> dict:
+    """issue #12: the only function in this module that writes .docx files.
+    Applies the review page's edits -- `profile`/`letter_paragraphs` free
+    text, `bullets` (role id -> ordered bullet ids) from checked checkboxes
+    -- onto a copy of the draft's TailorResult and renders. No
+    re-validation here: the review page's bullet checkboxes are drawn from
+    the real bullet bank (so `bullets` can't reference an id that doesn't
+    exist), and the free-text fields have no id-validity concept to check.
+    `experience_order`/`skills` are left exactly as the draft's result had
+    them -- the review page doesn't offer reordering roles or skills,
+    only which bullets render within the roles the model already picked."""
+    result = draft["result"].model_copy(update={
+        "profile": profile, "letter_paragraphs": letter_paragraphs, "bullets": bullets,
+    })
+    return _render(draft["candidate"], result, draft["job"], draft["lang"], out_dir)

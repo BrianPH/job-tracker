@@ -1,7 +1,8 @@
-"""Offline tests for jobtracker/generation.py (issue #11/M3b): the
-analyse -> tailor orchestration and its JSON handoff fallback. Fake
-Anthropic clients, same dependency-injection pattern as tests/test_tailor.py
--- no live API call."""
+"""Offline tests for jobtracker/generation.py (issue #11/M3b, extended by
+#12): the analyse -> tailor orchestration, its JSON handoff fallback, and
+the draft/regenerate/render split that puts a review step before anything
+is written to disk. Fake Anthropic clients, same dependency-injection
+pattern as tests/test_tailor.py -- no live API call."""
 import json
 import shutil
 import tempfile
@@ -14,6 +15,8 @@ from jobtracker.generation import (
     HANDOFF_STATUS,
     apply_handoff_upload,
     generate_or_handoff,
+    regenerate,
+    render_draft,
     write_handoff_request,
 )
 from jobtracker.generation_schema import AnalysisResult, TailorResult
@@ -90,21 +93,23 @@ def _with_tmp_out(fn):
 
 
 # --------------------------------------------------------------------------- #
-# generate_or_handoff: success path                                          #
+# generate_or_handoff: success path produces a DRAFT, not a document         #
 # --------------------------------------------------------------------------- #
-def test_generate_or_handoff_renders_on_success():
+def test_generate_or_handoff_produces_a_draft_on_success():
     def run(out):
         analysis = AnalysisResult(language="en", requirements=["Python"])
-        client = _QueuedClient([_FakeResponse(analysis), _FakeResponse(_good_tailor_result())])
+        tailor_result = _good_tailor_result()
+        client = _QueuedClient([_FakeResponse(analysis), _FakeResponse(tailor_result)])
         statuses = []
         result = generate_or_handoff(JOB, candidate=CANDIDATE, out_dir=out, client=client,
                                      set_status=statuses.append)
-        assert result["state"] == "done"
-        assert result["cv"].exists() and result["letter"].exists()
+        assert result["state"] == "draft"
+        assert result["result"] is tailor_result
+        assert result["analysis"] is analysis
+        assert result["lang"] == "en"
         assert statuses == []  # status untouched on success
-        letter = "\n".join(p.text for p in docx.Document(str(result["letter"])).paragraphs)
-        assert "Paragraph one." in letter
-        print("PASS test_generate_or_handoff_renders_on_success")
+        assert not any(out.iterdir())  # nothing written to disk yet
+        print("PASS test_generate_or_handoff_produces_a_draft_on_success")
     _with_tmp_out(run)
 
 
@@ -219,7 +224,7 @@ def test_generate_or_handoff_persistent_validation_errors_trigger_handoff():
 # --------------------------------------------------------------------------- #
 # apply_handoff_upload                                                       #
 # --------------------------------------------------------------------------- #
-def test_apply_handoff_upload_valid_restores_the_pre_handoff_status():
+def test_apply_handoff_upload_valid_produces_a_draft_and_restores_status():
     def run(out):
         # A real handoff writer would have recorded what the status was
         # BEFORE it flipped to HANDOFF_STATUS -- the upload must restore
@@ -232,10 +237,43 @@ def test_apply_handoff_upload_valid_restores_the_pre_handoff_status():
         generation_json = _good_tailor_result().model_dump()
         result = apply_handoff_upload(job, generation_json, candidate=CANDIDATE, out_dir=out,
                                       set_status=statuses.append)
-        assert result["state"] == "done"
-        assert result["cv"].exists() and result["letter"].exists()
+        assert result["state"] == "draft"
+        assert result["result"].profile == generation_json["profile"]
         assert statuses == ["New"]  # job had no status before the handoff -> defaults to "New"
-        print("PASS test_apply_handoff_upload_valid_restores_the_pre_handoff_status")
+        print("PASS test_apply_handoff_upload_valid_produces_a_draft_and_restores_status")
+    _with_tmp_out(run)
+
+
+def test_apply_handoff_upload_recovers_analysis_for_regenerate():
+    # When the handoff was written AFTER analyse already succeeded (tailor
+    # is what failed), the resulting draft must carry that SAME analysis,
+    # not None -- otherwise "Regenerate" would be unavailable for a handoff
+    # that only failed at the tailor step.
+    def run(out):
+        job = {**JOB, "status": HANDOFF_STATUS}
+        analysis = AnalysisResult(language="en", requirements=["Python"])
+        write_handoff_request(job, CANDIDATE, "en", "tailor failed", analysis=analysis,
+                              style_example="Dear team...", out_dir=out)
+
+        generation_json = _good_tailor_result().model_dump()
+        result = apply_handoff_upload(job, generation_json, candidate=CANDIDATE, out_dir=out)
+        assert result["state"] == "draft"
+        assert result["analysis"].model_dump() == analysis.model_dump()
+        assert result["style_example"] == "Dear team..."
+        print("PASS test_apply_handoff_upload_recovers_analysis_for_regenerate")
+    _with_tmp_out(run)
+
+
+def test_apply_handoff_upload_without_request_json_has_no_analysis():
+    # No request.json on disk at all (e.g. it was deleted, or this is a
+    # synthetic test upload) -- regenerate just isn't available, no crash.
+    def run(out):
+        result = apply_handoff_upload(JOB, _good_tailor_result().model_dump(),
+                                      candidate=CANDIDATE, out_dir=out)
+        assert result["state"] == "draft"
+        assert result["analysis"] is None
+        assert result["style_example"] == ""
+        print("PASS test_apply_handoff_upload_without_request_json_has_no_analysis")
     _with_tmp_out(run)
 
 
@@ -279,7 +317,7 @@ def test_generate_or_handoff_restores_previous_status_on_a_successful_retry():
         statuses = []
         result = generate_or_handoff(job, candidate=CANDIDATE, out_dir=out, client=client,
                                      set_status=statuses.append)
-        assert result["state"] == "done"
+        assert result["state"] == "draft"
         assert statuses == ["Reviewing"]
         print("PASS test_generate_or_handoff_restores_previous_status_on_a_successful_retry")
     _with_tmp_out(run)
@@ -348,8 +386,94 @@ def test_apply_handoff_upload_invalid_ids_renders_nothing():
     _with_tmp_out(run)
 
 
+# --------------------------------------------------------------------------- #
+# regenerate: issue #12, re-runs ONLY the tailor step                        #
+# --------------------------------------------------------------------------- #
+def test_regenerate_does_not_call_analyse_again():
+    def run(out):
+        analysis = AnalysisResult(language="en", requirements=["Python"])
+        new_result = _good_tailor_result()
+        client = _QueuedClient([_FakeResponse(new_result)])  # ONE call queued, not two
+        result = regenerate(JOB, analysis, CANDIDATE, "Dear team...", out_dir=out, client=client)
+        assert result["state"] == "draft"
+        assert result["result"] is new_result
+        assert result["errors"] == []
+        assert len(client.messages.captured) == 1
+        print("PASS test_regenerate_does_not_call_analyse_again")
+    _with_tmp_out(run)
+
+
+def test_regenerate_surfaces_validation_errors_without_retrying():
+    def run(out):
+        analysis = AnalysisResult(language="en", requirements=["Python"])
+        bad = TailorResult(language="en", profile="A tailored profile. " * 10,
+                           experience_order=["examplecorp"],
+                           bullets={"examplecorp": ["no-such-bullet"]},
+                           letter_paragraphs=["Paragraph one. " * 20, "Paragraph two. " * 20])
+        client = _QueuedClient([_FakeResponse(bad)])  # exactly one call -- no auto-retry
+        result = regenerate(JOB, analysis, CANDIDATE, out_dir=out, client=client)
+        assert result["state"] == "draft"
+        assert result["result"] is bad  # the attempt is still returned, errors are advisory
+        assert any("no-such-bullet" in e for e in result["errors"])
+        assert len(client.messages.captured) == 1
+        print("PASS test_regenerate_surfaces_validation_errors_without_retrying")
+    _with_tmp_out(run)
+
+
+def test_regenerate_sdk_failure_triggers_handoff():
+    def run(out):
+        analysis = AnalysisResult(language="en", requirements=["Python"])
+        client = _QueuedClient([CreditBalanceError("no credit")])
+        statuses = []
+        result = regenerate(JOB, analysis, CANDIDATE, out_dir=out, client=client,
+                            set_status=statuses.append)
+        assert result["state"] == "handoff"
+        assert statuses == ["Wacht op generatie"]
+        print("PASS test_regenerate_sdk_failure_triggers_handoff")
+    _with_tmp_out(run)
+
+
+# --------------------------------------------------------------------------- #
+# render_draft: the only function that writes .docx files                    #
+# --------------------------------------------------------------------------- #
+def _sample_draft(out):
+    return {
+        "job": JOB, "candidate": CANDIDATE, "lang": "en", "analysis": None,
+        "style_example": "", "result": _good_tailor_result(),
+    }
+
+
+def test_render_draft_applies_edits_and_writes_docx():
+    def run(out):
+        draft = _sample_draft(out)
+        edited_bullets = {"acmesoftware": ["acmesoftware-webapp"]}  # not what the draft had
+        result = render_draft(draft, "An edited profile paragraph.",
+                              ["Edited paragraph one.", "Edited paragraph two."],
+                              edited_bullets, out_dir=out)
+        assert result["state"] == "done"
+        assert result["cv"].exists() and result["letter"].exists()
+        letter = "\n".join(p.text for p in docx.Document(str(result["letter"])).paragraphs)
+        assert "Edited paragraph one." in letter
+        cv = "\n".join(p.text for p in docx.Document(str(result["cv"])).paragraphs)
+        assert "An edited profile paragraph." in cv
+        print("PASS test_render_draft_applies_edits_and_writes_docx")
+    _with_tmp_out(run)
+
+
+def test_render_draft_does_not_mutate_the_original_draft_result():
+    # draft["result"] must stay untouched so "Regenerate" (which reads it
+    # as the baseline) isn't corrupted by a prior Render's edits.
+    def run(out):
+        draft = _sample_draft(out)
+        original_profile = draft["result"].profile
+        render_draft(draft, "A completely different profile.", ["Body."], {}, out_dir=out)
+        assert draft["result"].profile == original_profile
+        print("PASS test_render_draft_does_not_mutate_the_original_draft_result")
+    _with_tmp_out(run)
+
+
 if __name__ == "__main__":
-    test_generate_or_handoff_renders_on_success()
+    test_generate_or_handoff_produces_a_draft_on_success()
     test_generate_or_handoff_no_client_triggers_handoff()
     test_generate_or_handoff_credit_balance_triggers_handoff()
     test_generate_or_handoff_bad_key_triggers_handoff()
@@ -357,11 +481,18 @@ if __name__ == "__main__":
     test_generate_or_handoff_truncated_tailor_reply_triggers_handoff()
     test_generate_or_handoff_persistent_validation_errors_trigger_handoff()
     test_generate_or_handoff_restores_previous_status_on_a_successful_retry()
-    test_apply_handoff_upload_valid_restores_the_pre_handoff_status()
+    test_apply_handoff_upload_valid_produces_a_draft_and_restores_status()
+    test_apply_handoff_upload_recovers_analysis_for_regenerate()
+    test_apply_handoff_upload_without_request_json_has_no_analysis()
     test_apply_handoff_upload_valid_restores_a_non_default_previous_status()
     test_apply_handoff_upload_leaves_status_untouched_when_not_in_handoff()
     test_apply_handoff_upload_invalid_shape_renders_nothing()
     test_apply_handoff_upload_invalid_ids_renders_nothing()
+    test_regenerate_does_not_call_analyse_again()
+    test_regenerate_surfaces_validation_errors_without_retrying()
+    test_regenerate_sdk_failure_triggers_handoff()
+    test_render_draft_applies_edits_and_writes_docx()
+    test_render_draft_does_not_mutate_the_original_draft_result()
     test_write_handoff_request_caps_description_like_the_live_prompts()
     test_write_handoff_request_preserves_previous_status_across_repeat_failures()
     print("\nAll generation tests passed.")
