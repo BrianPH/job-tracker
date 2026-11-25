@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .generator import OUTPUT_DIR, generate_application
+from .ingest import ThinContentError, ingest_url
 from .pipeline import ROOT, load_env, load_profile, run_pipeline
 from .storage import make_store
 
@@ -36,6 +37,7 @@ STATUSES = ["New", "Reviewing", "Applied", "Rejected"]
 # --- in-memory state (single local user) ------------------------------------ #
 SCRAPE = {"running": False, "log": [], "last_summary": None}
 GENERATION = {}  # job_id -> {"state": "running"|"done"|"error", "files": [...], "error": str}
+ADHOC_JOBS = {}  # job_id -> job dict, for jobs ingested from a URL/paste (not in the DB)
 _LOCK = threading.Lock()
 
 
@@ -152,6 +154,46 @@ def generate(job_id: str, background_tasks: BackgroundTasks):
         GENERATION[job_id] = {"state": "running", "files": []}
         background_tasks.add_task(_generate_worker, job_id, job)
     return RedirectResponse("/", status_code=303)
+
+
+# --- generate from a bare URL / pasted text ----------------------------------- #
+@app.get("/ingest", response_class=HTMLResponse)
+def ingest_form(request: Request, job_id: str = ""):
+    job = ADHOC_JOBS.get(job_id) if job_id else None
+    return templates.TemplateResponse(request, "ingest.html", {
+        "job": job, "job_id": job_id, "generation": GENERATION, "error": "", "url": "",
+    })
+
+
+@app.post("/ingest")
+def ingest_submit(background_tasks: BackgroundTasks,
+                  url: str = Form(""), paste_text: str = Form("")):
+    try:
+        job = ingest_url(url, paste_text or None)
+    except ThinContentError:
+        params = urlencode({"error": "thin", "url": url})
+        return RedirectResponse(f"/ingest/error?{params}", status_code=303)
+    except Exception as e:  # noqa: BLE001
+        params = urlencode({"error": str(e), "url": url})
+        return RedirectResponse(f"/ingest/error?{params}", status_code=303)
+
+    job_id = job["job_id"]
+    ADHOC_JOBS[job_id] = job
+    current = GENERATION.get(job_id, {})
+    if current.get("state") != "running":
+        GENERATION[job_id] = {"state": "running", "files": []}
+        background_tasks.add_task(_generate_worker, job_id, job)
+    return RedirectResponse(f"/ingest?job_id={job_id}", status_code=303)
+
+
+@app.get("/ingest/error", response_class=HTMLResponse)
+def ingest_error(request: Request, error: str = "", url: str = ""):
+    message = ("Kon de vacaturetekst niet automatisch ophalen (waarschijnlijk een "
+              "client-rendered pagina). Plak de vacaturetekst hieronder en probeer opnieuw.") \
+        if error == "thin" else f"Ophalen mislukt: {error}"
+    return templates.TemplateResponse(request, "ingest.html", {
+        "job": None, "job_id": "", "generation": GENERATION, "error": message, "url": url,
+    })
 
 
 @app.get("/applications/{path:path}")
