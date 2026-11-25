@@ -5,24 +5,32 @@ Order of attempts, matching issue #8's scope:
   1. If the URL matches a platform we already have an adapter for (Greenhouse,
      Lever, Ashby, SmartRecruiters, Teamtailor, Workday, Recruitee), call that
      platform's own single-posting detail endpoint directly and parse it with
-     the SAME parse_* function the bulk adapter uses in adapters.py.
-  2. Otherwise, fetch the page and extract the main content with trafilatura
-     (strips navigation/footer/cookie-banner chrome).
+     the SAME parse_* function the bulk adapter uses in adapters.py. If that
+     detail fetch fails (wrong/stale id, 404, a URL that only *looks* like the
+     platform's pattern — e.g. an "Apply" link rather than a listing link),
+     fall through to step 2 rather than giving up.
+  2. Fetch the page and extract the main content with trafilatura (strips
+     navigation/footer/cookie-banner chrome).
   3. If the extracted text is too short (typically a client-rendered SPA),
      optionally retry with Playwright (only if PLAYWRIGHT_ENABLED=1 and the
      `playwright` package is installed) — otherwise raise ThinContentError so
      the caller can ask the user to paste the vacancy text instead.
   4. Pasted text always short-circuits straight to a Job, no network.
 
-Every successful path writes a row to vacancy_snapshots (see snapshots.py)
-keyed by URL, so the text survives the posting going offline.
+Every attempt writes a row to vacancy_snapshots (see snapshots.py) keyed by
+URL, so the text survives the posting going offline — including a thin-content
+failure, which still saves the raw HTML that was too short to extract from,
+in case a human wants to look at it later.
 """
 from __future__ import annotations
 
+import os
 import re
 from typing import Callable, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
+import trafilatura
 
 from . import adapters
 from .models import Job
@@ -48,9 +56,9 @@ def _title_case_slug(slug: str) -> str:
 
 # --------------------------------------------------------------------------- #
 # Known-platform detail re-fetch. Each entry: (platform name, URL regex,      #
-# detail-fetch function taking the regex Match and returning a Job).          #
+# detail-fetch function taking the regex Match and returning (Job, raw)).     #
 # --------------------------------------------------------------------------- #
-def _detail_greenhouse(m: "re.Match") -> Job:
+def _detail_greenhouse(m: "re.Match") -> Tuple[Job, str]:
     board, job_id = m.group(1), m.group(2)
     url = f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{job_id}?content=true"
     resp = requests.get(url, headers=adapters.BROWSER_HEADERS, timeout=adapters.TIMEOUT)
@@ -58,7 +66,7 @@ def _detail_greenhouse(m: "re.Match") -> Job:
     return adapters.parse_greenhouse_job(resp.json(), _title_case_slug(board)), resp.text
 
 
-def _detail_lever(m: "re.Match") -> Job:
+def _detail_lever(m: "re.Match") -> Tuple[Job, str]:
     slug, posting_id = m.group(1), m.group(2)
     url = f"https://api.lever.co/v0/postings/{slug}/{posting_id}?mode=json"
     resp = requests.get(url, headers=adapters.BROWSER_HEADERS, timeout=adapters.TIMEOUT)
@@ -66,7 +74,7 @@ def _detail_lever(m: "re.Match") -> Job:
     return adapters.parse_lever_posting(resp.json(), _title_case_slug(slug)), resp.text
 
 
-def _detail_ashby(m: "re.Match") -> Job:
+def _detail_ashby(m: "re.Match") -> Tuple[Job, str]:
     token, posting_id = m.group(1), m.group(2)
     url = f"https://api.ashbyhq.com/posting-api/job-board/{token}"
     resp = requests.get(url, headers=adapters.BROWSER_HEADERS, timeout=adapters.TIMEOUT)
@@ -78,7 +86,7 @@ def _detail_ashby(m: "re.Match") -> Job:
     return adapters.parse_ashby_job(item, _title_case_slug(token)), resp.text
 
 
-def _detail_smartrecruiters(m: "re.Match") -> Job:
+def _detail_smartrecruiters(m: "re.Match") -> Tuple[Job, str]:
     company_id, posting_id = m.group(1), m.group(2)
     url = f"https://api.smartrecruiters.com/v1/companies/{company_id}/postings/{posting_id}"
     resp = requests.get(url, headers=adapters.BROWSER_HEADERS, timeout=adapters.TIMEOUT)
@@ -89,7 +97,7 @@ def _detail_smartrecruiters(m: "re.Match") -> Job:
     return job, resp.text
 
 
-def _detail_teamtailor(m: "re.Match") -> Job:
+def _detail_teamtailor(m: "re.Match") -> Tuple[Job, str]:
     site, posting_id = m.group(1), m.group(2)
     url = f"https://{site}/jobs.json"
     resp = requests.get(url, headers={"User-Agent": adapters.HEADERS["User-Agent"],
@@ -106,7 +114,7 @@ def _detail_teamtailor(m: "re.Match") -> Job:
     raise ValueError(f"Teamtailor posting {posting_id} not found on {site}")
 
 
-def _detail_workday(m: "re.Match") -> Job:
+def _detail_workday(m: "re.Match") -> Tuple[Job, str]:
     host, site, external_path = m.group(1), m.group(2), m.group(3)
     tenant = host.split(".")[0]
     detail_url = f"https://{host}/wday/cxs/{tenant}/{site}{external_path}"
@@ -124,7 +132,7 @@ def _detail_workday(m: "re.Match") -> Job:
     return job, resp.text
 
 
-def _detail_recruitee(m: "re.Match") -> Job:
+def _detail_recruitee(m: "re.Match") -> Tuple[Job, str]:
     slug, offer_slug = m.group(1), m.group(2)
     url = f"https://{slug}.recruitee.com/api/offers/{offer_slug}"
     resp = requests.get(url, headers=adapters.HEADERS, timeout=adapters.TIMEOUT)
@@ -135,6 +143,9 @@ def _detail_recruitee(m: "re.Match") -> Job:
 
 # (platform, regex, detail-fetch function). Order matters only in that the
 # first matching pattern wins; the patterns themselves don't overlap.
+# Workday's third group starts with the literal "/job" (not just what follows
+# it) and excludes "?"/"#" so apply-tracking query strings never leak into the
+# built detail URL or the job_id.
 PLATFORM_PATTERNS: Tuple[Tuple[str, "re.Pattern", Callable], ...] = (
     ("greenhouse", re.compile(r"(?:boards|job-boards)\.greenhouse\.io/([\w-]+)/jobs/(\d+)"),
      _detail_greenhouse),
@@ -146,7 +157,8 @@ PLATFORM_PATTERNS: Tuple[Tuple[str, "re.Pattern", Callable], ...] = (
      _detail_smartrecruiters),
     ("teamtailor", re.compile(r"([\w.-]+\.teamtailor\.com)/jobs/(\d+)-"),
      _detail_teamtailor),
-    ("workday", re.compile(r"([\w-]+\.wd\d+\.myworkdayjobs\.com)/(?:[\w-]+/)*([\w-]+)/job(/\S+)"),
+    ("workday",
+     re.compile(r"([\w-]+\.wd\d+\.myworkdayjobs\.com)/(?:[\w-]+/)*([\w-]+)(/job/[^\s?#]+)"),
      _detail_workday),
     ("recruitee", re.compile(r"([\w-]+)\.recruitee\.com/o/([\w-]+)"),
      _detail_recruitee),
@@ -162,12 +174,19 @@ def detect_platform(url: str) -> Optional[str]:
 
 def _fetch_known_platform(url: str) -> Optional[Tuple[str, Job, str]]:
     """Returns (platform, job, raw_json_text) for the first matching pattern,
-    or None if no pattern matches. Lets network/parsing errors propagate —
-    the caller decides whether to fall back to the generic path."""
+    or None if no pattern matches. A matched pattern whose actual fetch/parse
+    fails (RequestException, or ValueError for a posting id that isn't on the
+    board/site after all) also returns None, so the caller falls through to
+    the generic fetch+trafilatura path instead of giving up outright — a URL
+    can look like a known platform's pattern (e.g. an "Apply" link with a
+    different id shape) without that platform's detail call actually working."""
     for name, pattern, detail_fn in PLATFORM_PATTERNS:
         m = pattern.search(url)
         if m:
-            job, raw = detail_fn(m)
+            try:
+                job, raw = detail_fn(m)
+            except (requests.RequestException, ValueError):
+                return None
             return name, job, raw
     return None
 
@@ -180,7 +199,6 @@ def fetch_generic(url: str) -> Tuple[str, str]:
     resp = requests.get(url, headers=adapters.BROWSER_HEADERS, timeout=adapters.TIMEOUT)
     resp.raise_for_status()
     raw_html = resp.text
-    import trafilatura
     extracted = trafilatura.extract(raw_html, url=url) or ""
     return raw_html, extracted
 
@@ -189,7 +207,6 @@ def fetch_with_playwright(url: str) -> Optional[str]:
     """Best-effort JS render for client-rendered pages. Only runs when
     PLAYWRIGHT_ENABLED=1 and the playwright package is installed; otherwise
     returns None so the caller falls back to asking for pasted text."""
-    import os
     if os.getenv("PLAYWRIGHT_ENABLED") != "1":
         return None
     try:
@@ -206,6 +223,20 @@ def fetch_with_playwright(url: str) -> Optional[str]:
             browser.close()
 
 
+_TITLE_SEP_RE = re.compile(r"\s*[|\-–—]\s+")
+
+
+def _clean_title(raw_title: str) -> str:
+    """Career-page <title> tags are conventionally "Role Title | Company
+    Careers" or "Role Title - Company"; keep only the role part. A hyphen
+    inside a word (e.g. "Full-Stack") never matches — the separator requires
+    surrounding whitespace."""
+    if not raw_title:
+        return raw_title
+    first = _TITLE_SEP_RE.split(raw_title.strip(), maxsplit=1)[0].strip()
+    return first or raw_title.strip()
+
+
 def _title_from_html(raw_html: str, extracted_text: str) -> str:
     m = re.search(r"<title[^>]*>(.*?)</title>", raw_html, re.IGNORECASE | re.DOTALL)
     if m:
@@ -216,10 +247,38 @@ def _title_from_html(raw_html: str, extracted_text: str) -> str:
     return first_line[0][:200] if first_line else "Vacancy"
 
 
-def _job_from_text(url: str, title: str, description: str, source: str) -> Job:
+def _company_from_domain(url: str) -> str:
+    """Best-effort company guess from the registrable domain when no better
+    signal (og:site_name, JSON-LD) is available — e.g. "careers.acme.com" or
+    "acme.io" both -> "Acme". Approximate (doesn't know multi-part public
+    suffixes like .co.uk), good enough as a fallback, never used for a known
+    platform where the real company name/slug is already available."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    parts = [p for p in host.split(".") if p]
+    if len(parts) < 2:
+        return _title_case_slug(host)
+    return _title_case_slug(parts[-2])
+
+
+def _title_and_company_from_html(raw_html: str, extracted_text: str, url: str) -> Tuple[str, str]:
+    meta = trafilatura.extract_metadata(raw_html, default_url=url) if raw_html else None
+    title = (meta.title if meta else "") or _title_from_html(raw_html, extracted_text)
+    # trafilatura's sitename falls back to the bare hostname when the page has no
+    # og:site_name/JSON-LD signal -- in that case the domain heuristic below gives
+    # a nicer result ("Example Institute" vs. "example-institute.org").
+    sitename = (meta.sitename if meta else "") or ""
+    host = (urlparse(url).hostname or "").lower()
+    company = sitename if sitename and sitename.lower().strip(".") != host else _company_from_domain(url)
+    return _clean_title(title), company
+
+
+def _job_from_text(url: str, title: str, company: str, description: str, source: str) -> Job:
     return Job(
         title=title,
-        company="",
+        company=company,
         source=source,
         url=url,
         description=description,
@@ -232,8 +291,10 @@ def _job_from_text(url: str, title: str, description: str, source: str) -> Job:
 # --------------------------------------------------------------------------- #
 def ingest_url(url: str, paste_text: Optional[str] = None, snapshot_store=None) -> dict:
     """Ingest one vacancy and return a Job-shaped dict ready for
-    generator.generate_application(). Always writes a vacancy_snapshots row
-    (except when neither a URL nor a paste is given, which raises)."""
+    generator.generate_application(). Writes a vacancy_snapshots row on every
+    attempt, successful or not (a thin-content failure still saves the raw
+    HTML, in case a human wants to look at it later) — except when neither a
+    URL nor pasted text is given, which raises before any attempt is made."""
     url = (url or "").strip()
     paste_text = (paste_text or "").strip()
     if not url and not paste_text:
@@ -241,7 +302,7 @@ def ingest_url(url: str, paste_text: Optional[str] = None, snapshot_store=None) 
     store = snapshot_store if snapshot_store is not None else make_snapshot_store()
 
     if paste_text:
-        job = _job_from_text(url or "pasted-text", _title_from_html("", paste_text),
+        job = _job_from_text(url or "pasted-text", _title_from_html("", paste_text), "",
                              paste_text, "Pasted")
         store.save(url or job.job_id, job_id=job.job_id, platform="paste",
                   raw_source="", extracted_text=paste_text)
@@ -258,14 +319,15 @@ def ingest_url(url: str, paste_text: Optional[str] = None, snapshot_store=None) 
     if len(extracted) < MIN_EXTRACTED_CHARS:
         pw_html = fetch_with_playwright(url)
         if pw_html:
-            import trafilatura
             pw_text = trafilatura.extract(pw_html, url=url) or ""
             if len(pw_text) >= MIN_EXTRACTED_CHARS:
                 raw_html, extracted = pw_html, pw_text
     if len(extracted) < MIN_EXTRACTED_CHARS:
+        store.save(url, job_id="", platform="thin", raw_source=raw_html, extracted_text="")
         raise ThinContentError(url, raw_html)
 
-    job = _job_from_text(url, _title_from_html(raw_html, extracted), extracted, "Ingested")
+    title, company = _title_and_company_from_html(raw_html, extracted, url)
+    job = _job_from_text(url, title, company, extracted, "Ingested")
     store.save(url, job_id=job.job_id, platform="html",
               raw_source=raw_html, extracted_text=extracted)
     return job.to_record()
