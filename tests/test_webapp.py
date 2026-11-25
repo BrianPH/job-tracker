@@ -1,7 +1,6 @@
 """Webapp tests with FastAPI TestClient against a temp JSON store (no network)."""
 import json
 import os
-import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -158,91 +157,99 @@ def main():
     assert r.status_code == 404
     print("PASS request.json download 404s once there is no handoff state at all")
 
-    # GENERATION is purely in-memory and would be empty right after a
-    # restart -- the job's persisted status + request.json on disk must be
-    # enough on their own to keep the download/upload UI reachable.
-    from jobtracker.generator import OUTPUT_DIR as _OUTPUT_DIR
-    handoff_folder = _OUTPUT_DIR / "GenomeScan_Bioinformatician"
-    handoff_request_path = handoff_folder / "request.json"
-    handoff_folder.mkdir(parents=True, exist_ok=True)
-    handoff_request_path.write_text(
-        json.dumps({"error": "no credit left", "previous_status": "New"}), encoding="utf-8")
-    webapp._store().update_status("test:1", HANDOFF_STATUS)
-    try:
-        r = client.get("/")
-        assert r.status_code == 200 and "download request.json" in r.text
-        r = client.get("/jobs/test:1/request.json")
-        assert r.status_code == 200 and "no credit left" in r.text
-        print("PASS handoff UI and download survive a restart via status + request.json on disk")
-    finally:
-        shutil.rmtree(handoff_folder, ignore_errors=True)
-        webapp._store().update_status("test:1", "New")
+    # The routes/tests below render or write request.json for real (not
+    # mocked) -- _generate_worker and the upload route both pass
+    # out_dir=OUTPUT_DIR explicitly (webapp's own module global, read at
+    # call time), so patching webapp.OUTPUT_DIR redirects every one of
+    # them at a throwaway tmp dir instead of the repo's real applications/
+    # (which docker-compose bind-mounts into the running container --
+    # writing or deleting folders there in a test would touch the user's
+    # actual generated documents).
+    test_out_dir = tmp / "applications"
+    with patch.object(webapp, "OUTPUT_DIR", test_out_dir):
+        # GENERATION is purely in-memory and would be empty right after a
+        # restart -- the job's persisted status + request.json on disk must
+        # be enough on their own to keep the download/upload UI reachable.
+        handoff_folder = test_out_dir / "GenomeScan_Bioinformatician"
+        handoff_folder.mkdir(parents=True)
+        (handoff_folder / "request.json").write_text(
+            json.dumps({"error": "no credit left", "previous_status": "New"}), encoding="utf-8")
+        webapp._store().update_status("test:1", HANDOFF_STATUS)
+        try:
+            r = client.get("/")
+            assert r.status_code == 200 and "download request.json" in r.text
+            r = client.get("/jobs/test:1/request.json")
+            assert r.status_code == 200 and "no credit left" in r.text
+            print("PASS handoff UI and download survive a restart via status + request.json on disk")
+        finally:
+            webapp._store().update_status("test:1", "New")
 
-    from jobtracker.generator import OUTPUT_DIR
-    fake_cv = OUTPUT_DIR / "Acme_Data_Engineer" / "CV_Test.docx"
-    fake_letter = OUTPUT_DIR / "Acme_Data_Engineer" / "Cover_Letter.docx"
+        fake_cv = test_out_dir / "Acme_Data_Engineer" / "CV_Test.docx"
+        fake_letter = test_out_dir / "Acme_Data_Engineer" / "Cover_Letter.docx"
 
-    with patch("jobtracker.webapp.generation.apply_handoff_upload",
-              lambda job, data, **kw: {"state": "done", "cv": fake_cv,
-                                       "letter": fake_letter, "lang": "en"}):
-        files = {"generation_file": ("generation.json", b'{"language": "en"}', "application/json")}
-        r = client.post("/jobs/test:1/generation-upload", files=files, follow_redirects=False)
-    assert r.status_code == 303
-    assert webapp.GENERATION["test:1"]["state"] == "done"
-    assert webapp.GENERATION["test:1"]["files"] == [
-        "Acme_Data_Engineer/CV_Test.docx", "Acme_Data_Engineer/Cover_Letter.docx"]
-    print("PASS valid generation.json upload renders and clears the handoff state")
-
-    webapp.GENERATION["test:1"] = {"state": "handoff", "error": "no credit", "files": []}
-    with patch("jobtracker.webapp.generation.apply_handoff_upload",
-              lambda job, data, **kw: {"state": "invalid", "errors": ["bad bullet id"]}):
-        files = {"generation_file": ("generation.json", b'{"language": "en"}', "application/json")}
-        r = client.post("/jobs/test:1/generation-upload", files=files, follow_redirects=False)
-    assert r.status_code == 303
-    assert webapp.GENERATION["test:1"]["state"] == "handoff"
-    assert "bad bullet id" in webapp.GENERATION["test:1"]["error"]
-    print("PASS invalid generation.json upload stays in the handoff state with the errors shown")
-
-    files = {"generation_file": ("generation.json", b"not json at all", "application/json")}
-    r = client.post("/jobs/test:1/generation-upload", files=files, follow_redirects=False)
-    assert r.status_code == 303
-    assert "not valid JSON" in webapp.GENERATION["test:1"]["error"]
-    print("PASS a non-JSON upload is rejected without calling the validator")
-
-    r = client.post("/jobs/unknown-job/generation-upload",
-                    files={"generation_file": ("g.json", b"{}", "application/json")},
-                    follow_redirects=False)
-    assert r.status_code == 303 and r.headers["location"] == "/"
-    print("PASS generation-upload for an unknown job redirects without error")
-
-    # --- _set_status_fn: DB-backed job vs. ADHOC_JOBS job go to different
-    # sinks -- exercised through the real (unmocked) upload route, so this
-    # proves the actual wiring, not just the helper in isolation.
-    valid_generation_json = {
-        "language": "en", "profile": "A tailored profile. " * 10,
-        "experience_order": ["examplecorp"], "bullets": {"examplecorp": ["examplecorp-pipelines"]},
-        "skills": ["Python"],
-        "letter_paragraphs": ["Paragraph one. " * 20, "Paragraph two. " * 20],
-    }
-
-    webapp._store().update_status("test:2", HANDOFF_STATUS)
-    db_folder = _OUTPUT_DIR / "RemoteCo_Remote_Python_Dev"
-    try:
-        files = {"generation_file": ("generation.json", json.dumps(valid_generation_json).encode(),
-                                     "application/json")}
-        r = client.post("/jobs/test:2/generation-upload", files=files, follow_redirects=False)
+        with patch("jobtracker.webapp.generation.apply_handoff_upload",
+                  lambda job, data, **kw: {"state": "done", "cv": fake_cv,
+                                           "letter": fake_letter, "lang": "en"}):
+            files = {"generation_file": ("generation.json", b'{"language": "en"}',
+                                         "application/json")}
+            r = client.post("/jobs/test:1/generation-upload", files=files, follow_redirects=False)
         assert r.status_code == 303
-        assert json.loads(store_path.read_text())["test:2"]["status"] == "New"
-        assert webapp.GENERATION["test:2"]["state"] == "done"
-        print("PASS generation-upload for a DB-backed job restores status via store.update_status")
-    finally:
-        shutil.rmtree(db_folder, ignore_errors=True)
-        webapp._store().update_status("test:2", "New")
+        assert webapp.GENERATION["test:1"]["state"] == "done"
+        assert webapp.GENERATION["test:1"]["files"] == [
+            "Acme_Data_Engineer/CV_Test.docx", "Acme_Data_Engineer/Cover_Letter.docx"]
+        print("PASS valid generation.json upload renders and clears the handoff state")
 
-    webapp.ADHOC_JOBS["ingest:abc123"]["status"] = HANDOFF_STATUS
-    adhoc_folder = _OUTPUT_DIR / "Acme_Data_Engineer"
-    try:
-        files = {"generation_file": ("generation.json", json.dumps(valid_generation_json).encode(),
+        webapp.GENERATION["test:1"] = {"state": "handoff", "error": "no credit", "files": []}
+        with patch("jobtracker.webapp.generation.apply_handoff_upload",
+                  lambda job, data, **kw: {"state": "invalid", "errors": ["bad bullet id"]}):
+            files = {"generation_file": ("generation.json", b'{"language": "en"}',
+                                         "application/json")}
+            r = client.post("/jobs/test:1/generation-upload", files=files, follow_redirects=False)
+        assert r.status_code == 303
+        assert webapp.GENERATION["test:1"]["state"] == "handoff"
+        assert "bad bullet id" in webapp.GENERATION["test:1"]["error"]
+        print("PASS invalid generation.json upload stays in the handoff state with the errors shown")
+
+        files = {"generation_file": ("generation.json", b"not json at all", "application/json")}
+        r = client.post("/jobs/test:1/generation-upload", files=files, follow_redirects=False)
+        assert r.status_code == 303
+        assert "not valid JSON" in webapp.GENERATION["test:1"]["error"]
+        print("PASS a non-JSON upload is rejected without calling the validator")
+
+        r = client.post("/jobs/unknown-job/generation-upload",
+                        files={"generation_file": ("g.json", b"{}", "application/json")},
+                        follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/"
+        print("PASS generation-upload for an unknown job redirects without error")
+
+        # --- _set_status_fn: DB-backed job vs. ADHOC_JOBS job go to
+        # different sinks -- exercised through the real (unmocked) upload
+        # route, so this proves the actual wiring, not just the helper in
+        # isolation.
+        valid_generation_json = {
+            "language": "en", "profile": "A tailored profile. " * 10,
+            "experience_order": ["examplecorp"],
+            "bullets": {"examplecorp": ["examplecorp-pipelines"]},
+            "skills": ["Python"],
+            "letter_paragraphs": ["Paragraph one. " * 20, "Paragraph two. " * 20],
+        }
+
+        webapp._store().update_status("test:2", HANDOFF_STATUS)
+        try:
+            files = {"generation_file": ("generation.json",
+                                         json.dumps(valid_generation_json).encode(),
+                                         "application/json")}
+            r = client.post("/jobs/test:2/generation-upload", files=files, follow_redirects=False)
+            assert r.status_code == 303
+            assert json.loads(store_path.read_text())["test:2"]["status"] == "New"
+            assert webapp.GENERATION["test:2"]["state"] == "done"
+            print("PASS generation-upload for a DB-backed job restores status via store.update_status")
+        finally:
+            webapp._store().update_status("test:2", "New")
+
+        webapp.ADHOC_JOBS["ingest:abc123"]["status"] = HANDOFF_STATUS
+        files = {"generation_file": ("generation.json",
+                                     json.dumps(valid_generation_json).encode(),
                                      "application/json")}
         r = client.post("/jobs/ingest:abc123/generation-upload", files=files, follow_redirects=False)
         assert r.status_code == 303
@@ -250,8 +257,6 @@ def main():
         # must NOT have touched the real job store for an id it has no row for
         assert "ingest:abc123" not in json.loads(store_path.read_text())
         print("PASS generation-upload for an ADHOC job restores status in ADHOC_JOBS, not the store")
-    finally:
-        shutil.rmtree(adhoc_folder, ignore_errors=True)
 
     print("\nAll webapp tests passed.")
 

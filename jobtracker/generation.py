@@ -86,7 +86,11 @@ def write_handoff_request(job: dict, candidate: dict, lang: str, error: str,
         "job": {
             "job_id": job.get("job_id", ""),
             "title": job.get("title", ""), "company": job.get("company", ""),
-            "location": job.get("location", ""), "description": job.get("description", ""),
+            "location": job.get("location", ""),
+            # capped the same way the live analyse/tailor prompts cap it
+            # (tailor.VACANCY_DESC_CHARS), so a hand-run /tailor sees
+            # exactly what the live call would have -- not more.
+            "description": (job.get("description") or "")[:tailor.VACANCY_DESC_CHARS],
         },
         "analysis": analysis.model_dump() if analysis is not None else None,
         "error": error,

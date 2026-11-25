@@ -200,7 +200,8 @@ def _redirect_target(job_id: str) -> str:
 
 def _generate_worker(job_id: str, job: dict):
     try:
-        result = generation.generate_or_handoff(job, set_status=_set_status_fn(job_id))
+        result = generation.generate_or_handoff(job, out_dir=OUTPUT_DIR,
+                                                set_status=_set_status_fn(job_id))
     except Exception as e:  # noqa: BLE001
         GENERATION[job_id] = {"state": "error", "error": str(e), "files": []}
         return
@@ -259,7 +260,8 @@ async def generation_upload(job_id: str, generation_file: UploadFile = File(...)
                               "error": "Uploaded file is not valid JSON."}
         return RedirectResponse(_redirect_target(job_id), status_code=303)
 
-    result = generation.apply_handoff_upload(job, data, set_status=_set_status_fn(job_id))
+    result = generation.apply_handoff_upload(job, data, out_dir=OUTPUT_DIR,
+                                             set_status=_set_status_fn(job_id))
     if result["state"] == "invalid":
         current = GENERATION.get(job_id, {})
         GENERATION[job_id] = {**current, "state": "handoff",

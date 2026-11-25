@@ -185,7 +185,8 @@ capitalized word in the free text that does not appear anywhere in
 `candidate.yaml`'s facts, catching cases where the model invents something
 despite the "never invent facts" instruction — but **no caller invokes it
 yet**: its warnings are not currently computed or shown anywhere. Wiring it
-into a review page is tracked as part of issue #12 below.
+into a review page is tracked under "Generation review page" in the
+Roadmap below (issue #12).
 
 **JSON handoff on failure.** If the pipeline cannot produce a usable result
 — no `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` configured, the account has

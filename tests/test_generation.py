@@ -285,6 +285,23 @@ def test_generate_or_handoff_restores_previous_status_on_a_successful_retry():
     _with_tmp_out(run)
 
 
+def test_write_handoff_request_caps_description_like_the_live_prompts():
+    # The handoff is meant to let a human reproduce exactly what the live
+    # call would have seen -- if the description were uncapped here while
+    # the live prompts cap it, a hand-run /tailor would see MORE than the
+    # live path ever did.
+    from jobtracker.tailor import VACANCY_DESC_CHARS
+
+    def run(out):
+        long_description = "x" * (VACANCY_DESC_CHARS * 2)
+        job = {**JOB, "description": long_description}
+        path = write_handoff_request(job, CANDIDATE, "en", "boom", out_dir=out)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["job"]["description"] == "x" * VACANCY_DESC_CHARS
+        print("PASS test_write_handoff_request_caps_description_like_the_live_prompts")
+    _with_tmp_out(run)
+
+
 def test_write_handoff_request_preserves_previous_status_across_repeat_failures():
     # A second consecutive failure (the job is already in HANDOFF_STATUS
     # when this handoff is written) must not overwrite the recorded
@@ -345,5 +362,6 @@ if __name__ == "__main__":
     test_apply_handoff_upload_leaves_status_untouched_when_not_in_handoff()
     test_apply_handoff_upload_invalid_shape_renders_nothing()
     test_apply_handoff_upload_invalid_ids_renders_nothing()
+    test_write_handoff_request_caps_description_like_the_live_prompts()
     test_write_handoff_request_preserves_previous_status_across_repeat_failures()
     print("\nAll generation tests passed.")
