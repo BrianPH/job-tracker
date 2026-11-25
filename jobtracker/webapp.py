@@ -173,8 +173,13 @@ def ingest_submit(background_tasks: BackgroundTasks,
     except ThinContentError:
         params = urlencode({"error": "thin", "url": url})
         return RedirectResponse(f"/ingest/error?{params}", status_code=303)
-    except Exception as e:  # noqa: BLE001
+    except ValueError as e:
+        # user input error (e.g. neither url nor paste_text given) -- safe to show as-is
         params = urlencode({"error": str(e), "url": url})
+        return RedirectResponse(f"/ingest/error?{params}", status_code=303)
+    except Exception as e:  # noqa: BLE001 - don't reflect raw exception text into the page
+        print(f"  [ingest] fetch failed for {url}: {e}")
+        params = urlencode({"error": "fetch_failed", "url": url})
         return RedirectResponse(f"/ingest/error?{params}", status_code=303)
 
     job_id = job["job_id"]
@@ -188,9 +193,14 @@ def ingest_submit(background_tasks: BackgroundTasks,
 
 @app.get("/ingest/error", response_class=HTMLResponse)
 def ingest_error(request: Request, error: str = "", url: str = ""):
-    message = ("Kon de vacaturetekst niet automatisch ophalen (waarschijnlijk een "
-              "client-rendered pagina). Plak de vacaturetekst hieronder en probeer opnieuw.") \
-        if error == "thin" else f"Ophalen mislukt: {error}"
+    if error == "thin":
+        message = ("Kon de vacaturetekst niet automatisch ophalen (waarschijnlijk een "
+                  "client-rendered pagina). Plak de vacaturetekst hieronder en probeer opnieuw.")
+    elif error == "fetch_failed":
+        message = ("Ophalen van de URL is mislukt. Controleer de URL, of plak de "
+                  "vacaturetekst hieronder.")
+    else:
+        message = error  # a safe, user-input-level ValueError message
     return templates.TemplateResponse(request, "ingest.html", {
         "job": None, "job_id": "", "generation": GENERATION, "error": message, "url": url,
     })
