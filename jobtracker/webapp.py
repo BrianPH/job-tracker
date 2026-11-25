@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from . import generation
+from . import generator
 from .generator import OUTPUT_DIR
 from .ingest import IngestInputError, ThinContentError, ingest_url
 from .pipeline import ROOT, load_env, load_profile, run_pipeline
@@ -74,6 +75,44 @@ def start_scrape(rescore: bool = False) -> bool:
     return True
 
 
+# --- handoff recovery (survives a restart; GENERATION does not) -------------- #
+def _handoff_view(job: Optional[dict]) -> Optional[dict]:
+    """Reconstructs a GENERATION-shaped "handoff" entry from the job's
+    persisted status and request.json on disk. GENERATION is purely
+    in-memory and empty again after a restart, but the job's status
+    ("Wacht op generatie") and request.json both survive one -- without
+    this, the download/upload UI would silently disappear on restart even
+    though the job is still, correctly, waiting on a human (see deploy.yml,
+    which restarts the container on every push)."""
+    if job is None or job.get("status") != generation.HANDOFF_STATUS:
+        return None
+    candidate = generator.load_candidate()
+    lang = generator.detect_language(f"{job.get('title','')} {job.get('description','')}")
+    path = generator.application_paths(job, candidate, lang, OUTPUT_DIR)[0].parent / "request.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    return {"state": "handoff", "error": payload.get("error", ""),
+           "request_path": str(path), "files": []}
+
+
+def _generation_view(jobs: list) -> dict:
+    """GENERATION, with a synthesized handoff entry added for any job whose
+    status says it's waiting on a human but has no (fresher) in-memory
+    entry -- e.g. right after a restart."""
+    view = dict(GENERATION)
+    for job in jobs:
+        job_id = job.get("job_id")
+        if job_id and job_id not in view:
+            synthesized = _handoff_view(job)
+            if synthesized is not None:
+                view[job_id] = synthesized
+    return view
+
+
 # --- routes ------------------------------------------------------------------ #
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, status: str = "", company: str = "", source: str = "",
@@ -99,7 +138,7 @@ def index(request: Request, status: str = "", company: str = "", source: str = "
         "jobs": jobs, "statuses": STATUSES, "sources": sources,
         "flt": {"status": status, "company": company, "source": source,
                 "q": q, "min_score": min_score, "remote": remote},
-        "scrape": SCRAPE, "generation": GENERATION,
+        "scrape": SCRAPE, "generation": _generation_view(jobs),
     })
 
 
@@ -193,8 +232,11 @@ def generate(job_id: str, background_tasks: BackgroundTasks):
 @app.get("/jobs/{job_id}/request.json")
 def download_request_json(job_id: str):
     gen = GENERATION.get(job_id) or {}
-    path_str = gen.get("request_path")
-    if gen.get("state") != "handoff" or not path_str:
+    path_str = gen.get("request_path") if gen.get("state") == "handoff" else None
+    if not path_str:
+        synthesized = _handoff_view(_get_job(job_id))
+        path_str = synthesized.get("request_path") if synthesized else None
+    if not path_str:
         return HTMLResponse("Not found", status_code=404)
     path = Path(path_str)
     if not path.is_file():
@@ -234,7 +276,8 @@ async def generation_upload(job_id: str, generation_file: UploadFile = File(...)
 def ingest_form(request: Request, job_id: str = ""):
     job = ADHOC_JOBS.get(job_id) if job_id else None
     return templates.TemplateResponse(request, "ingest.html", {
-        "job": job, "job_id": job_id, "generation": GENERATION, "error": "", "url": "",
+        "job": job, "job_id": job_id, "generation": _generation_view([job] if job else []),
+        "error": "", "url": "",
     })
 
 
