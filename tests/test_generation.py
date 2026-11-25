@@ -56,6 +56,16 @@ class _QueuedClient:
         self.messages = _QueuedMessages(queue)
 
 
+def _fake_status_error(error_cls, status_code: int, message: str, error_type: str):
+    """Same helper as tests/test_tailor.py: builds a genuine
+    anthropic.APIStatusError subclass the way the SDK itself does."""
+    import httpx2
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    body = {"type": "error", "error": {"type": error_type, "message": message}}
+    response = httpx2.Response(status_code, request=request, json=body)
+    return error_cls(message, response=response, body=body)
+
+
 def _good_tailor_result():
     return TailorResult(
         language="en", profile="A tailored profile. " * 10,
@@ -129,6 +139,41 @@ def test_generate_or_handoff_credit_balance_triggers_handoff():
         assert result["state"] == "handoff"
         assert statuses == ["Wacht op generatie"]
         print("PASS test_generate_or_handoff_credit_balance_triggers_handoff")
+    _with_tmp_out(run)
+
+
+def test_generate_or_handoff_bad_key_triggers_handoff():
+    # "bad key" -- a configured ANTHROPIC_API_KEY the API itself rejects --
+    # is a different failure from GenerationUnavailableError (no key
+    # configured at all, tested above): a live 401 from the SDK.
+    import anthropic
+
+    def run(out):
+        err = _fake_status_error(anthropic.AuthenticationError, 401,
+                                 "invalid x-api-key", "authentication_error")
+        client = _QueuedClient([err])
+        statuses = []
+        result = generate_or_handoff(JOB, candidate=CANDIDATE, out_dir=out, client=client,
+                                     set_status=statuses.append)
+        assert result["state"] == "handoff"
+        assert statuses == ["Wacht op generatie"]
+        print("PASS test_generate_or_handoff_bad_key_triggers_handoff")
+    _with_tmp_out(run)
+
+
+def test_generate_or_handoff_rate_limit_exhausted_triggers_handoff():
+    # "rate-limit-exhausted-retries" -- the SDK's own max_retries (see
+    # tailor.make_client) absorbs transient 429s; this simulates one that
+    # survives all of them and still reaches this process.
+    import anthropic
+
+    def run(out):
+        err = _fake_status_error(anthropic.RateLimitError, 429,
+                                 "rate limited", "rate_limit_error")
+        client = _QueuedClient([err])
+        result = generate_or_handoff(JOB, candidate=CANDIDATE, out_dir=out, client=client)
+        assert result["state"] == "handoff"
+        print("PASS test_generate_or_handoff_rate_limit_exhausted_triggers_handoff")
     _with_tmp_out(run)
 
 
@@ -211,6 +256,8 @@ if __name__ == "__main__":
     test_generate_or_handoff_renders_on_success()
     test_generate_or_handoff_no_client_triggers_handoff()
     test_generate_or_handoff_credit_balance_triggers_handoff()
+    test_generate_or_handoff_bad_key_triggers_handoff()
+    test_generate_or_handoff_rate_limit_exhausted_triggers_handoff()
     test_generate_or_handoff_truncated_tailor_reply_triggers_handoff()
     test_generate_or_handoff_persistent_validation_errors_trigger_handoff()
     test_apply_handoff_upload_valid_renders_and_clears_status()

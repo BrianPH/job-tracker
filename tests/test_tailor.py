@@ -109,19 +109,24 @@ class _SequentialClient:
         self.messages = _SequentialMessages(responses, self.captured)
 
 
-def _fake_payment_required_error() -> "Exception":
-    """A genuine anthropic.PaymentRequiredError (402), built the way the SDK
-    itself builds APIStatusError subclasses -- not a stand-in -- so
-    _parse_or_raise's `except anthropic.PaymentRequiredError` actually
-    matches it."""
-    import anthropic
+def _fake_status_error(error_cls, status_code: int, message: str, error_type: str):
+    """Builds a genuine anthropic.APIStatusError subclass the way the SDK
+    itself does -- not a stand-in -- so an `except <SDK type>` clause
+    actually matches it."""
     import httpx2
     request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    body = {"type": "error", "error": {"type": "payment_required_error",
-                                       "message": "Your credit balance is too low."}}
-    response = httpx2.Response(402, request=request, json=body)
-    return anthropic.PaymentRequiredError("Your credit balance is too low.",
-                                          response=response, body=body)
+    body = {"type": "error", "error": {"type": error_type, "message": message}}
+    response = httpx2.Response(status_code, request=request, json=body)
+    return error_cls(message, response=response, body=body)
+
+
+def _fake_payment_required_error() -> "Exception":
+    """A genuine anthropic.PaymentRequiredError (402) -- see
+    _fake_status_error -- so _parse_or_raise's
+    `except anthropic.PaymentRequiredError` actually matches it."""
+    import anthropic
+    return _fake_status_error(anthropic.PaymentRequiredError, 402,
+                              "Your credit balance is too low.", "payment_required_error")
 
 
 # --------------------------------------------------------------------------- #
@@ -329,6 +334,31 @@ def test_parse_or_raise_translates_payment_required_to_credit_balance_error():
     print("PASS test_parse_or_raise_translates_payment_required_to_credit_balance_error")
 
 
+def test_parse_or_raise_does_not_misclassify_an_ordinary_bad_request_error():
+    # Acceptance criterion: a 400 that isn't a credit-balance error must NOT
+    # be treated as one -- it should propagate as the SDK's own
+    # BadRequestError, not CreditBalanceError.
+    import anthropic
+
+    class _BadRequestMessages:
+        def parse(self, **kwargs):
+            raise _fake_status_error(anthropic.BadRequestError, 400,
+                                     "max_tokens must be at least 1.", "invalid_request_error")
+
+    class _BadRequestClient:
+        messages = _BadRequestMessages()
+
+    job = {"title": "Data Engineer", "company": "Acme", "description": "Build things."}
+    analysis = AnalysisResult(language="en")
+    try:
+        tailor_application(job, analysis, CANDIDATE, client=_BadRequestClient())
+    except CreditBalanceError:
+        raise AssertionError("an ordinary 400 must not be classified as CreditBalanceError")
+    except anthropic.BadRequestError:
+        pass
+    print("PASS test_parse_or_raise_does_not_misclassify_an_ordinary_bad_request_error")
+
+
 def test_run_tailor_pipeline_no_retry_when_first_reply_is_valid():
     result = _sample_tailor_result()
     client = _SequentialClient([_FakeResponse(result)])
@@ -414,6 +444,7 @@ if __name__ == "__main__":
     test_allowed_terms_skips_missing_company()
     test_tailor_application_includes_retry_errors_in_prompt()
     test_parse_or_raise_translates_payment_required_to_credit_balance_error()
+    test_parse_or_raise_does_not_misclassify_an_ordinary_bad_request_error()
     test_run_tailor_pipeline_no_retry_when_first_reply_is_valid()
     test_run_tailor_pipeline_retries_once_then_succeeds()
     test_run_tailor_pipeline_returns_remaining_errors_when_retry_also_fails()
