@@ -9,10 +9,14 @@ Features
   remote rule and the daily scrape hour — written back to config/profile.yaml.
 - "Scrape nu" button: runs the pipeline in a background thread, live log shown.
 - Per-job "Genereer CV + brief": runs the analyse/tailor Claude API pipeline
-  (jobtracker/generation.py) in a background thread; download links appear on
-  the job row. On any unrecovered failure the job gets a JSON handoff instead
+  (jobtracker/generation.py) in a background thread, producing a DRAFT --
+  a review page (issue #12) lets you edit the profile/letter text and toggle
+  which bullets render, re-run tailoring ("Regenerate"), and only then
+  "Render" writes the .docx files; nothing is written until Render is
+  clicked. On any unrecovered failure the job gets a JSON handoff instead
   (issue #11/M3b): download request.json, run `.claude/commands/tailor.md` or
-  paste it into claude.ai, upload the resulting generation.json.
+  paste it into claude.ai, upload the resulting generation.json -- which
+  also lands on the review page rather than rendering directly.
 - APScheduler: runs the pipeline automatically once a day (hour configurable).
 """
 from __future__ import annotations
@@ -30,6 +34,8 @@ from fastapi.templating import Jinja2Templates
 
 from . import generation
 from . import generator
+from . import tailor
+from .generation_schema import ground_tailor_result
 from .generator import OUTPUT_DIR
 from .ingest import IngestInputError, ThinContentError, ingest_url
 from .pipeline import ROOT, load_env, load_profile, run_pipeline
@@ -42,9 +48,13 @@ STATUSES = ["New", "Reviewing", "Applied", "Rejected", generation.HANDOFF_STATUS
 
 # --- in-memory state (single local user) ------------------------------------ #
 SCRAPE = {"running": False, "log": [], "last_summary": None}
-# job_id -> {"state": "running"|"done"|"handoff"|"error", "files": [...], "error": str,
-#            "request_path": str (handoff only)}
+# job_id -> {"state": "running"|"draft"|"done"|"handoff"|"error", "files": [...],
+#            "error": str, "request_path": str (handoff only)}
 GENERATION = {}
+# job_id -> the dict jobtracker.generation.generate_or_handoff/apply_handoff_upload
+# returns on a "draft" state ({"job","candidate","analysis","lang","style_example",
+# "result"}) -- the review page (issue #12) reads/edits this; only Render clears it.
+DRAFTS = {}
 ADHOC_JOBS = {}  # job_id -> job dict, for jobs ingested from a URL/paste (not in the DB)
 _LOCK = threading.Lock()
 
@@ -209,9 +219,8 @@ def _generate_worker(job_id: str, job: dict):
         GENERATION[job_id] = {"state": "handoff", "error": result["error"],
                               "request_path": str(result["request_path"]), "files": []}
     else:
-        rel = [str(p.relative_to(OUTPUT_DIR)).replace("\\", "/") for p in
-               (result["cv"], result["letter"])]
-        GENERATION[job_id] = {"state": "done", "files": rel, "lang": result["lang"]}
+        DRAFTS[job_id] = result
+        GENERATION[job_id] = {"state": "draft", "files": []}
 
 
 def _get_job(job_id: str) -> Optional[dict]:
@@ -267,9 +276,104 @@ async def generation_upload(job_id: str, generation_file: UploadFile = File(...)
         GENERATION[job_id] = {**current, "state": "handoff",
                               "error": "; ".join(result["errors"])}
     else:
-        rel = [str(p.relative_to(OUTPUT_DIR)).replace("\\", "/") for p in
-               (result["cv"], result["letter"])]
-        GENERATION[job_id] = {"state": "done", "files": rel, "lang": result["lang"]}
+        DRAFTS[job_id] = result
+        GENERATION[job_id] = {"state": "draft", "files": []}
+    return RedirectResponse(_redirect_target(job_id), status_code=303)
+
+
+# --- generation review page (issue #12) --------------------------------------- #
+def _bullet_text(bullet: dict, lang: str) -> str:
+    return bullet.get(lang) or bullet.get("en") or bullet.get("nl") or ""
+
+
+def _review_context(job_id: str, job: dict, draft: dict) -> dict:
+    result = draft["result"]
+    candidate = draft["candidate"]
+    analysis = draft.get("analysis")
+    lang = draft["lang"]
+
+    roles_by_id = {r["id"]: r for r in candidate.get("experience", [])
+                  if isinstance(r, dict) and r.get("id")}
+    selected_bullet_ids = set()
+    for ids in result.bullets.values():
+        selected_bullet_ids.update(ids)
+
+    role_views = []
+    for role_id in result.experience_order:
+        role = roles_by_id.get(role_id)
+        if role is None:
+            continue
+        bullets = [b for b in (role.get("bullets") or []) if isinstance(b, dict) and b.get("id")]
+        role_views.append({
+            "role_id": role_id,
+            "title": role.get(f"title_{lang}") or role.get("title", ""),
+            "company": role.get("company", ""),
+            "bullets": [{"id": b["id"], "text": _bullet_text(b, lang),
+                        "checked": b["id"] in selected_bullet_ids} for b in bullets],
+        })
+
+    allowed_terms = tailor.allowed_terms(job, analysis) if analysis is not None else []
+    warnings = ground_tailor_result(result, candidate, extra_allowed_terms=allowed_terms)
+
+    return {
+        "job": job, "job_id": job_id, "result": result, "roles": role_views,
+        "profile_text": result.profile, "letter_text": "\n\n".join(result.letter_paragraphs),
+        "requirement_map": result.requirement_map, "notes": result.notes_for_candidate,
+        "warnings": warnings, "can_regenerate": analysis is not None,
+    }
+
+
+@app.get("/jobs/{job_id}/review", response_class=HTMLResponse)
+def review_page(request: Request, job_id: str):
+    job = _get_job(job_id)
+    draft = DRAFTS.get(job_id)
+    if job is None or draft is None:
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(request, "review.html",
+                                      _review_context(job_id, job, draft))
+
+
+@app.post("/jobs/{job_id}/review/regenerate")
+def review_regenerate(job_id: str):
+    job = _get_job(job_id)
+    draft = DRAFTS.get(job_id)
+    if job is None or draft is None or draft.get("analysis") is None:
+        return RedirectResponse(f"/jobs/{job_id}/review", status_code=303)
+
+    result = generation.regenerate(job, draft["analysis"], draft["candidate"],
+                                   draft.get("style_example", ""), out_dir=OUTPUT_DIR,
+                                   set_status=_set_status_fn(job_id))
+    if result["state"] == "handoff":
+        DRAFTS.pop(job_id, None)
+        GENERATION[job_id] = {"state": "handoff", "error": result["error"],
+                              "request_path": str(result["request_path"]), "files": []}
+        return RedirectResponse(_redirect_target(job_id), status_code=303)
+
+    draft["result"] = result["result"]
+    return RedirectResponse(f"/jobs/{job_id}/review", status_code=303)
+
+
+@app.post("/jobs/{job_id}/review/render")
+def review_render(job_id: str, profile: str = Form(...), letter: str = Form(...),
+                  bullets: list = Form([])):
+    job = _get_job(job_id)
+    draft = DRAFTS.get(job_id)
+    if job is None or draft is None:
+        return RedirectResponse("/", status_code=303)
+
+    bullets_by_role: dict = {}
+    for item in bullets:
+        role_id, _, bullet_id = item.partition("::")
+        if role_id and bullet_id:
+            bullets_by_role.setdefault(role_id, []).append(bullet_id)
+    letter_paragraphs = [p.strip() for p in letter.split("\n\n") if p.strip()]
+
+    result = generation.render_draft(draft, profile.strip(), letter_paragraphs,
+                                     bullets_by_role, out_dir=OUTPUT_DIR)
+    rel = [str(p.relative_to(OUTPUT_DIR)).replace("\\", "/") for p in
+           (result["cv"], result["letter"])]
+    GENERATION[job_id] = {"state": "done", "files": rel, "lang": result["lang"]}
+    DRAFTS.pop(job_id, None)
     return RedirectResponse(_redirect_target(job_id), status_code=303)
 
 
