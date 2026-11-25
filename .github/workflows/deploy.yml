@@ -47,6 +47,7 @@ jobs:
           docker compose run --rm --no-deps app python -m tests.test_candidate_import
           docker compose run --rm --no-deps app python -m tests.test_generation_schema
           docker compose run --rm --no-deps app python -m tests.test_tailor
+          docker compose run --rm --no-deps app python -m tests.test_generation
           docker compose run --rm --no-deps app python -m tests.test_generation_records
 
       - name: Deploy (images already local — no pull/build here)
