@@ -76,7 +76,12 @@ def _lang_field(d: dict, field: str, lang: str) -> str:
 
 
 def _bullet_text(bullet: dict, lang: str) -> str:
-    return bullet.get(lang) or bullet.get("nl") or bullet.get("en") or ""
+    """Exact-language text only -- unlike _lang_field, there's no safe plain-
+    field fallback for free-text prose. Falling back to the other language
+    would silently leak Dutch bullet text into an English CV (the same risk
+    `highlights` is deliberately excluded from in the fallback letter body);
+    a bullet missing the requested language is dropped instead."""
+    return bullet.get(lang, "")
 
 
 def load_profile(path: Path = PROFILE_PATH) -> dict:
@@ -231,12 +236,12 @@ def _template_letter_body(job: dict, candidate: dict, lang: str) -> str:
         rcompany = role.get("company", "")
         bullets = role.get("bullets") or []
         bullet = _bullet_text(bullets[0], lang) if bullets else ""
-        if not rcompany:
+        if not rtitle:
             return ""
         if lang == "nl":
-            s = f"Bij {rcompany} werkte ik als {rtitle}."
+            s = f"Bij {rcompany} werkte ik als {rtitle}." if rcompany else f"Ik werkte als {rtitle}."
         else:
-            s = f"At {rcompany}, I worked as {rtitle}."
+            s = f"At {rcompany}, I worked as {rtitle}." if rcompany else f"I worked as {rtitle}."
         return f"{s} {bullet}".strip()
 
     role_sentences = [s for s in (role_sentence(r) for r in roles[:2]) if s]
@@ -274,44 +279,54 @@ LETTER_LABELS = {
 
 
 def cv_render_context(candidate: dict, summary: str, lang: str) -> dict:
+    """Bullets/skills/languages are exposed as LISTS, not pre-joined strings --
+    the template owns list-item layout (e.g. a "List Bullet" paragraph style
+    per entry), so swapping in a real Word design can change that layout
+    without touching this code. Non-dict entries (a malformed candidate.yaml,
+    e.g. a plain string where a {name: ...} dict is expected) are skipped
+    rather than crashing -- load_candidate()'s only validation is "is this
+    YAML", so a typo here shouldn't take down generation entirely."""
     p = candidate.get("personal", {})
     experience = []
     for e in candidate.get("experience", []):
-        bullets = [_bullet_text(b, lang) for b in e.get("bullets", []) if _bullet_text(b, lang)]
+        if not isinstance(e, dict):
+            continue
+        bullets = [_bullet_text(b, lang) for b in e.get("bullets", []) if isinstance(b, dict)]
         experience.append({
             "title": _lang_field(e, "title", lang),
             "company": e.get("company", ""),
             "period": _lang_field(e, "period", lang),
-            "bullets_line": " • ".join(bullets),
+            "bullets": [b for b in bullets if b],
         })
     education = [{
         "degree": _lang_field(e, "degree", lang),
         "school": _lang_field(e, "school", lang),
         "period": _lang_field(e, "period", lang),
-    } for e in candidate.get("education", [])]
-    skills_line = ", ".join(
+    } for e in candidate.get("education", []) if isinstance(e, dict)]
+    skills = [
         f"{s.get('name','')} ({_lang_field(s, 'level', lang)})" if _lang_field(s, "level", lang)
         else s.get("name", "")
-        for s in candidate.get("skills", []) if s.get("name")
-    )
-    languages_line = ", ".join(
+        for s in candidate.get("skills", []) if isinstance(s, dict) and s.get("name")
+    ]
+    languages = [
         f"{_lang_field(lg, 'name', lang)} ({_lang_field(lg, 'level', lang)})"
-        for lg in candidate.get("languages", []) if _lang_field(lg, "name", lang)
-    )
+        for lg in candidate.get("languages", [])
+        if isinstance(lg, dict) and _lang_field(lg, "name", lang)
+    ]
     return {
         "name": p.get("name", ""), "address": p.get("address", ""),
         "email": p.get("email", ""), "phone": p.get("phone", ""),
         "profile": summary,
         "experience": experience,
         "education": education,
-        "skills_line": skills_line,
-        "languages_line": languages_line,
+        "skills": skills,
+        "languages": languages,
     }
 
 
 def letter_render_context(candidate: dict, job: dict, body: str, lang: str) -> dict:
     p = candidate.get("personal", {})
-    labels = LETTER_LABELS[lang]
+    labels = LETTER_LABELS.get(lang, LETTER_LABELS["en"])
     salutation = labels["salutation"] if lang == "nl" else f"Dear {job.get('company','')} team,"
     body_paragraphs = [b.strip() for b in body.split("\n") if b.strip()]
     return {
