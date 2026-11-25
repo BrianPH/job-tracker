@@ -141,10 +141,13 @@ is the single source of facts.
 
 ### Analyse + tailor pipeline (backend module)
 
-`jobtracker/tailor.py` replaces the single "write a profile paragraph" call
-with a two-step pipeline, using the official `anthropic` SDK's structured
-outputs so a reply always parses into the schema in
-`jobtracker/generation_schema.py`:
+`jobtracker/tailor.py` will eventually replace the single "write a profile
+paragraph" call with a two-step pipeline. It uses the official `anthropic`
+SDK's structured outputs, so a *complete* reply always parses into the
+schema defined in `jobtracker/generation_schema.py`. Truncation and the
+SDK's own exceptions (authentication errors, rate limits, refusals) can
+still occur -- see `GenerationTruncatedError` and
+`GenerationUnavailableError` in `tailor.py`.
 
 1. **Analyse** (Haiku, `ANTHROPIC_MODEL_EXTRACT`) extracts the vacancy's
    requirements, keywords, language, contact, deadline, and any application
@@ -157,15 +160,18 @@ outputs so a reply always parses into the schema in
    employer.
 
 A pure-code validator (`generation_schema.validate_tailor_result`) then
-checks every bullet/role/skill id against `candidate.yaml`, checks word
-counts, and treats a reply truncated at `max_tokens` as a failed generation;
-a second, non-blocking check (`ground_tailor_result`) flags — but does not
-block on — a number, year, or capitalized word in the free text that
-doesn't appear anywhere in `candidate.yaml`'s facts, in case the model
-invented something despite the "never invent facts" instruction. Each
-analyse/tailor call is recorded (model id, token usage, stop reason, raw
-response) via `jobtracker/generation_records.py`, keyed by job, for later
-cost and failure auditing.
+checks every bullet, role, skill, and requirement-evidence id against
+`candidate.yaml`, and treats a reply truncated at `max_tokens` as a failed
+generation. These are blocking checks: a failure here means the result must
+not be rendered. A second, non-blocking check (`ground_tailor_result`) flags
+-- without blocking on -- word counts outside the prompt's target range, an
+explicit "N years of experience" claim, and a number, year, or capitalized
+word in the free text that does not appear anywhere in `candidate.yaml`'s
+facts. This catches cases where the model invents something despite the
+"never invent facts" instruction. Each analyse/tailor call is recorded
+(model id, token usage, stop reason, raw response) via
+`jobtracker/generation_records.py`, keyed by job, for later cost and
+failure auditing.
 
 This module is unit-tested against a mocked SDK client — no live Claude API
 call is made in tests. **It isn't wired into the web UI yet**: rendering a
