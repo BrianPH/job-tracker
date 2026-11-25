@@ -235,9 +235,14 @@ def fetch_with_playwright(url: str) -> Optional[str]:
             browser.close()
 
 
-_TITLE_SEP_RE = re.compile(r"\s*[|\-–—]\s+")
+_PIPE_SEP_RE = re.compile(r"\s*\|\s*")
+_DASH_SEP_RE = re.compile(r"\s+[\-–—]\s+")
 _BOILERPLATE_TAIL_RE = re.compile(
     r"^(careers?|jobs?|vacature(n)?|vacancies|werken\s+bij)\b", re.IGNORECASE)
+_LEADING_COMPANY_BOILERPLATE_RE = re.compile(
+    r"^(careers?\s+at|jobs?\s+at|werken\s+bij|vacatures?\s+bij)\s+", re.IGNORECASE)
+_TRAILING_COMPANY_BOILERPLATE_RE = re.compile(
+    r"[\s|\-–—]+(careers?|jobs?|vacatures?)\s*$", re.IGNORECASE)
 # A sitename that is itself just a bare domain (no spaces, dot-separated
 # labels) carries no real signal -- trafilatura falls back to the hostname
 # (stripping a leading "www."/"w1." etc.) when a page has no og:site_name,
@@ -252,26 +257,32 @@ _SECOND_LEVEL_SUFFIXES = {"co", "ac", "org", "gov", "edu", "net", "sch"}
 
 def _clean_title(raw_title: str, company: str = "") -> str:
     """Career-page <title> tags are conventionally "Role Title | Company
-    Careers" or "Role Title - Company"; strip that tail -- but ONLY when it
-    actually looks like boilerplate or repeats the resolved company name.
-    A plain dash/em-dash is common in legitimate titles too (Dutch titles
-    especially: "Senior Onderzoeker — afdeling Genomics"), so an unconditional
-    split would wrongly truncate those. A hyphen inside a word (e.g.
-    "Full-Stack") never matches the separator, which requires surrounding
-    whitespace."""
+    Careers" or "Role Title - Company". "|" is essentially never part of a
+    real job title, so always split on it. A dash/em-dash tail is common in
+    LEGITIMATE titles too (Dutch titles especially: "Senior Onderzoeker —
+    afdeling Genomics"), so that split only applies when the tail actually
+    looks like boilerplate or repeats the resolved company name -- otherwise
+    an unconditional split would wrongly truncate those. A hyphen inside a
+    word (e.g. "Full-Stack") never matches the dash separator, which
+    requires surrounding whitespace."""
     if not raw_title:
         return raw_title
-    raw_title = raw_title.strip()
-    parts = _TITLE_SEP_RE.split(raw_title, maxsplit=1)
-    if len(parts) == 1:
-        return raw_title
-    head, tail = parts[0].strip(), parts[1].strip()
-    tail_norm = tail.lower()
-    looks_boilerplate = bool(_BOILERPLATE_TAIL_RE.match(tail_norm))
-    repeats_company = bool(company) and company.lower() in tail_norm
-    if head and (looks_boilerplate or repeats_company):
-        return head
-    return raw_title
+    title = raw_title.strip()
+
+    pipe_parts = _PIPE_SEP_RE.split(title, maxsplit=1)
+    if len(pipe_parts) > 1 and pipe_parts[0].strip():
+        title = pipe_parts[0].strip()
+
+    dash_parts = _DASH_SEP_RE.split(title, maxsplit=1)
+    if len(dash_parts) > 1:
+        head, tail = dash_parts[0].strip(), dash_parts[1].strip()
+        tail_norm = tail.lower()
+        looks_boilerplate = bool(_BOILERPLATE_TAIL_RE.match(tail_norm))
+        repeats_company = bool(company) and company.lower() in tail_norm
+        if head and (looks_boilerplate or repeats_company):
+            title = head
+
+    return title or raw_title
 
 
 def _title_from_html(raw_html: str, extracted_text: str) -> str:
@@ -307,6 +318,20 @@ def _company_from_domain(url: str) -> str:
     return _title_case_slug(parts[-2])
 
 
+def _strip_company_boilerplate(name: str) -> str:
+    """A genuine og:site_name routinely carries the same boilerplate
+    _clean_title strips from titles -- "Jobs at Acme", "Werken bij Acme",
+    "Acme | Careers", "Acme Labs Careers" should all resolve to just the
+    company. Unlike _clean_title's title-tail stripping, there's no
+    "repeats the company" signal to gate on here (this IS the company
+    value), so strip unconditionally."""
+    if not name:
+        return name
+    stripped = _LEADING_COMPANY_BOILERPLATE_RE.sub("", name)
+    stripped = _TRAILING_COMPANY_BOILERPLATE_RE.sub("", stripped).strip()
+    return stripped or name.strip()
+
+
 def _title_and_company_from_html(raw_html: str, extracted_text: str, url: str) -> Tuple[str, str]:
     meta = trafilatura.extract_metadata(raw_html, default_url=url) if raw_html else None
     title = (meta.title if meta else "") or _title_from_html(raw_html, extracted_text)
@@ -316,8 +341,10 @@ def _title_and_company_from_html(raw_html: str, extracted_text: str, url: str) -
     # shape (dot-separated labels, no spaces) rather than comparing against
     # the exact original host, which the www-stripping would dodge.
     sitename = (meta.sitename if meta else "") or ""
-    company = _company_from_domain(url) if _looks_like_bare_domain(sitename) or not sitename \
-        else sitename
+    if _looks_like_bare_domain(sitename) or not sitename:
+        company = _company_from_domain(url)
+    else:
+        company = _strip_company_boilerplate(sitename)
     return _clean_title(title, company), company
 
 
