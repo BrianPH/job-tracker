@@ -60,6 +60,10 @@ python -m tests.test_webapp
 - **CV + brief** — per vacancy, generates a tailored CV and motivation letter
   (.docx) in `applications/<Company>_<Title>/`. Dutch or English is
   auto-detected from the vacancy text.
+- **Vanaf URL** (`/ingest`) — generate a CV + brief for a vacancy that was
+  never scraped: paste its URL (or the vacancy text itself) and a tailored
+  CV/letter is generated the same way as for a scraped job. See
+  [Generating from a bare URL](#generating-from-a-bare-url) below.
 - **Daily scrape** — APScheduler runs the pipeline once a day at the configured
   hour, as long as the web app is running.
 
@@ -87,6 +91,39 @@ profile paragraph and the letter body, style-guided by your example letters in
 template is used instead, so generation always works.
 
 Keep `config/candidate.yaml` up to date when your CV changes.
+
+### Generating from a bare URL
+
+The `/ingest` page (also reachable from the "Vanaf URL" link in the web UI)
+lets you generate a CV and motivation letter for a vacancy that the scraper
+never picked up — for example a one-off listing outside your configured
+sources. Paste the vacancy URL, or the vacancy text itself, and submit:
+
+1. **Known platform.** If the URL matches a platform job-tracker already has
+   an adapter for (Greenhouse, Lever, Ashby, SmartRecruiters, Teamtailor,
+   Workday or Recruitee), job-tracker calls that platform's own
+   single-posting API directly — the same parsing code the bulk scraper
+   uses — so the title, location and full description come from structured
+   data, not from scraping the rendered page.
+2. **Generic page.** For any other URL, job-tracker fetches the page and
+   extracts the main content with
+   [`trafilatura`](https://trafilatura.readthedocs.io/), which strips
+   navigation, footers and cookie banners.
+3. **Client-rendered page.** If the extracted text is too short — typically
+   because the page renders its content with JavaScript and a plain HTTP
+   fetch only sees an empty shell — job-tracker falls back to Playwright when
+   `PLAYWRIGHT_ENABLED=1` is set and the `playwright` package is installed.
+   Without that, the page shows an error asking you to paste the vacancy text
+   into the form instead, and generation proceeds from the pasted text with
+   no further network access.
+
+Every ingested vacancy is written to the `vacancy_snapshots` table (or, on
+the local-JSON backend, `data/vacancy_snapshots.json`) keyed by URL, storing
+the raw source and the extracted text. This keeps the vacancy text available
+for later reference — for example before an interview — even after the
+original posting is taken offline. Jobs generated this way are **not** added
+to the main vacancy board; they only exist for the duration of the
+generation request and its downloadable `.docx` files.
 
 ---
 
@@ -250,6 +287,14 @@ Edit `CASES` in `score_test.py` to add your own test vacancies.
   Editable via the web UI.
 - `config/candidate.yaml` — structured CV facts for document generation.
 
+The vacancy snapshots written by the `/ingest` page (see
+[Generating from a bare URL](#generating-from-a-bare-url)) use the same
+backend choice as `jobs`: a `vacancy_snapshots` table on Postgres, or
+`data/vacancy_snapshots.json` on the local-JSON backend. Set
+`PLAYWRIGHT_ENABLED=1` (with the `playwright` package installed) to let
+`/ingest` render client-rendered pages before falling back to asking for
+pasted text.
+
 All three files above hold personal data and are git-ignored. If
 `config/profile.yaml` is missing, the pipeline and generator fall back to
 `config/profile.example.yaml`, which is tracked in the repo — copy it to
@@ -275,6 +320,9 @@ config/profile.yaml ───┘       ▲                                      
 - `jobtracker/filters.py` — rule filter incl. salary setpoint.
 - `jobtracker/scorer.py` — LLM fit-scoring (local Ollama, or Anthropic).
 - `jobtracker/generator.py` — CV + motivation letter .docx generation.
+- `jobtracker/ingest.py` — generate from a bare URL/pasted text: known-platform
+  detail re-fetch, trafilatura extraction, optional Playwright fallback.
+- `jobtracker/snapshots.py` — `vacancy_snapshots` storage for ingested vacancies.
 - `jobtracker/pipeline.py` — reusable fetch→filter→score→store run.
 - `jobtracker/webapp.py` — FastAPI UI, setpoints, scheduler.
 - `jobtracker/storage.py` — Postgres / local JSON / Airtable backends.
@@ -292,5 +340,6 @@ config/profile.yaml ───┘       ▲                                      
 - [x] Web UI with links, filters, setpoints (incl. salary)
 - [x] CV + motivation letter generation per vacancy
 - [x] Daily scheduled scrape (in the web app)
+- [x] Generate a CV + brief from a bare vacancy URL or pasted text
 - [ ] E-mail/Slack digest of new high-score matches
 - [ ] Playwright-based adapter for JS-rendered career sites
