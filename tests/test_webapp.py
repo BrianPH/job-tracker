@@ -89,7 +89,7 @@ def main():
 
     r = client.post("/ingest", data={"url": "", "paste_text": ""}, follow_redirects=True)
     assert r.status_code == 200
-    assert "URL of" in r.text or "vereist" in r.text.lower() or "required" in r.text.lower()
+    assert "A vacancy URL or pasted text is required." in r.text
     print("PASS ingest with neither url nor paste shows the input-error message")
 
     # A schemeless URL ("acme.com/careers/1", no "https://") raises

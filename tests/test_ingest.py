@@ -12,6 +12,7 @@ from jobtracker.ingest import (
     ThinContentError,
     _clean_title,
     _company_from_domain,
+    _strip_company_boilerplate,
     detect_platform,
     ingest_url,
 )
@@ -374,7 +375,9 @@ def test_ingest_generic_page_with_real_sitename_is_kept():
     store = FakeSnapshotStore()
     with patch("jobtracker.ingest.requests.get", _fake_get({url: (None, html, None)})):
         job = ingest_url(url, snapshot_store=store)
-    assert job["company"] == "Acme Labs Careers"
+    # A genuine og:site_name routinely carries the same "Careers" boilerplate
+    # a <title> tag does -- it must be stripped here too, same as for titles.
+    assert job["company"] == "Acme Labs"
     print("PASS test_ingest_generic_page_with_real_sitename_is_kept")
 
 
@@ -386,14 +389,21 @@ def test_thin_snapshot_survives_later_paste_save():
     tmp = Path(tempfile.mkdtemp(prefix="jt_snap_")) / "vacancy_snapshots.json"
     store = LocalJSONSnapshotStore(str(tmp))
     url = "https://spa-example.com/careers/1"
+    # A prior successful ingest established a real job_id; a later transient
+    # thin-content failure for the same URL must not erase it.
+    store.save(url, job_id="html:abc", platform="html", raw_source="<html>full page</html>",
+              extracted_text="full extracted text")
     store.save(url, job_id="", platform="thin", raw_source="<html>shell</html>",
               extracted_text="")
-    store.save(url, job_id="ingest:abc", platform="paste", raw_source="",
-              extracted_text="pasted text")
+    row = store.get(url)
+    assert row["job_id"] == "html:abc"  # not erased by the thin save's job_id=""
+    assert row["platform"] == "thin"    # non-empty fields still update normally
+
+    store.save(url, job_id="", platform="paste", raw_source="", extracted_text="pasted text")
     row = store.get(url)
     assert row["raw_source"] == "<html>shell</html>"  # not wiped by the empty paste save
     assert row["extracted_text"] == "pasted text"      # the new non-empty value DID apply
-    assert row["platform"] == "paste"                  # non-empty fields still update normally
+    assert row["platform"] == "paste"
     print("PASS test_thin_snapshot_survives_later_paste_save")
 
 
@@ -422,6 +432,28 @@ def test_clean_title_strips_boilerplate_or_company_tail():
     assert _clean_title("Role Title | Acme Careers", "Acme") == "Role Title"
     assert _clean_title("Backend Developer - Werken bij Acme", "Acme") == "Backend Developer"
     print("PASS test_clean_title_strips_boilerplate_or_company_tail")
+
+
+def test_clean_title_strips_pipe_tail_unconditionally():
+    # "|" is essentially never part of a real job title, so this must split
+    # even when the domain-derived company doesn't textually match how the
+    # title spells the organisation's name -- the common case for Dutch
+    # institutions (e.g. company="Umcutrecht" from the domain vs. "UMC
+    # Utrecht" as actually written in the title).
+    assert _clean_title("Datamanager | UMC Utrecht", "Umcutrecht") == "Datamanager"
+    assert _clean_title("Senior Developer | Stichting Sanquin", "Sanquin-Bloedvoorziening") == \
+        "Senior Developer"
+    assert _clean_title("Data Engineer | Koninklijke Acme N.V.", "Acme-Group") == "Data Engineer"
+    print("PASS test_clean_title_strips_pipe_tail_unconditionally")
+
+
+def test_strip_company_boilerplate():
+    assert _strip_company_boilerplate("Jobs at Acme") == "Acme"
+    assert _strip_company_boilerplate("Werken bij Acme") == "Acme"
+    assert _strip_company_boilerplate("Acme | Careers") == "Acme"
+    assert _strip_company_boilerplate("Acme Labs Careers") == "Acme Labs"
+    assert _strip_company_boilerplate("Acme") == "Acme"  # no boilerplate -- unchanged
+    print("PASS test_strip_company_boilerplate")
 
 
 # --------------------------------------------------------------------------- #
@@ -480,6 +512,8 @@ if __name__ == "__main__":
     test_company_from_domain_handles_second_level_suffixes()
     test_clean_title_keeps_legitimate_dash_titles()
     test_clean_title_strips_boilerplate_or_company_tail()
+    test_clean_title_strips_pipe_tail_unconditionally()
+    test_strip_company_boilerplate()
     test_snapshot_id_normalizes_host_case_only()
     test_snapshot_survives_posting_removed()
     print("\nAll ingest tests passed.")
