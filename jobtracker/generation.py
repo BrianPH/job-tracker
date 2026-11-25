@@ -45,6 +45,28 @@ def _request_path(job: dict, candidate: dict, lang: str, out_dir: Path) -> Path:
     return cv_path.parent / "request.json"
 
 
+def _saved_previous_status(path: Path) -> Optional[str]:
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("previous_status")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _previous_status(job: dict, path: Path) -> str:
+    """The status to restore once a handoff is resolved. Usually just the
+    job's current status at the moment of writing request.json -- but if
+    this is a SECOND consecutive failure (a prior handoff that was retried
+    and failed again before ever being resolved), job["status"] is already
+    HANDOFF_STATUS, which would overwrite -- and lose -- the real original.
+    Fall back to whatever the existing request.json already recorded."""
+    current = job.get("status") or "New"
+    if current != HANDOFF_STATUS:
+        return current
+    return _saved_previous_status(path) or "New"
+
+
 def write_handoff_request(job: dict, candidate: dict, lang: str, error: str,
                           analysis: Optional[object] = None, style_example: str = "",
                           out_dir: Path = OUTPUT_DIR,
@@ -68,6 +90,10 @@ def write_handoff_request(job: dict, candidate: dict, lang: str, error: str,
         },
         "analysis": analysis.model_dump() if analysis is not None else None,
         "error": error,
+        # restored by _clear_handoff once this handoff is resolved, rather
+        # than hardcoding "New" and clobbering a status the user had
+        # already set (e.g. "Reviewing") before generation failed.
+        "previous_status": _previous_status(job, path),
         **tailor.handoff_context(candidate, lang, style_example),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,11 +103,23 @@ def write_handoff_request(job: dict, candidate: dict, lang: str, error: str,
     return path
 
 
+def _clear_handoff(job: dict, candidate: dict, lang: str, out_dir: Path,
+                   set_status: Optional[Callable[[str], None]]) -> None:
+    """Restores whatever status the job had before a handoff, once that
+    handoff is resolved by either a live retry or an upload succeeding. A
+    no-op when the job was never in the handoff state -- the ordinary
+    generate-again-on-an-already-rendered-job path must not touch status
+    at all."""
+    if set_status is None or job.get("status") != HANDOFF_STATUS:
+        return
+    path = _request_path(job, candidate, lang, out_dir)
+    set_status(_saved_previous_status(path) or "New")
+
+
 def _render(candidate: dict, result: TailorResult, job: dict, lang: str, out_dir: Path) -> dict:
     cv_path, letter_path = generator.application_paths(job, candidate, lang, out_dir)
     cv_ctx = generator.cv_render_context_from_tailor_result(candidate, result, lang)
-    letter_body = "\n\n".join(result.letter_paragraphs)
-    letter_ctx = generator.letter_render_context(candidate, job, letter_body, lang)
+    letter_ctx = generator.letter_render_context(candidate, job, result.letter_paragraphs, lang)
     generator.build_cv_docx(cv_ctx, lang, cv_path)
     generator.build_letter_docx(letter_ctx, lang, letter_path)
     return {"state": "done", "cv": cv_path, "letter": letter_path, "lang": lang}
@@ -108,15 +146,20 @@ def generate_or_handoff(job: dict, candidate: Optional[dict] = None,
     try:
         result, errors = tailor.run_tailor_pipeline(job, analysis, candidate, style_example,
                                                      client=client)
-        if errors:
-            raise tailor.GenerationTruncatedError(
-                "Tailor result failed validation after one retry: " + "; ".join(errors))
     except _HANDOFF_EXCEPTIONS as e:
         path = write_handoff_request(job, candidate, analysis.language, str(e),
                                      analysis=analysis, style_example=style_example,
                                      out_dir=out_dir, set_status=set_status)
         return {"state": "handoff", "request_path": path, "error": str(e)}
 
+    if errors:
+        error_msg = "Tailor result failed validation after one retry: " + "; ".join(errors)
+        path = write_handoff_request(job, candidate, analysis.language, error_msg,
+                                     analysis=analysis, style_example=style_example,
+                                     out_dir=out_dir, set_status=set_status)
+        return {"state": "handoff", "request_path": path, "error": error_msg}
+
+    _clear_handoff(job, candidate, analysis.language, out_dir, set_status)
     return _render(candidate, result, job, analysis.language, out_dir)
 
 
@@ -127,9 +170,9 @@ def apply_handoff_upload(job: dict, generation_json: dict, candidate: Optional[d
     claude.ai) and uploads the resulting generation.json -- a bare
     TailorResult JSON object, no wrapper. Goes through the EXACT SAME
     validator as a live reply; on success this renders (same as
-    generate_or_handoff's success path) and clears the handoff status back
-    to "New" for re-review. On failure it renders nothing and returns the
-    validation errors -- never a partial/best-effort document."""
+    generate_or_handoff's success path) and restores whatever status the
+    job had before the handoff. On failure it renders nothing and returns
+    the validation errors -- never a partial/best-effort document."""
     candidate = candidate if candidate is not None else generator.load_candidate()
     try:
         result = TailorResult.model_validate(generation_json)
@@ -141,6 +184,5 @@ def apply_handoff_upload(job: dict, generation_json: dict, candidate: Optional[d
         return {"state": "invalid", "errors": errors}
 
     rendered = _render(candidate, result, job, result.language, out_dir)
-    if set_status is not None:
-        set_status("New")
+    _clear_handoff(job, candidate, result.language, out_dir, set_status)
     return rendered

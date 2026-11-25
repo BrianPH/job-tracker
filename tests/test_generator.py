@@ -185,6 +185,19 @@ def test_letter_render_context_builds_paragraphs_from_body():
     print("PASS test_letter_render_context_builds_paragraphs_from_body")
 
 
+def test_letter_render_context_accepts_a_paragraph_list_without_resplitting():
+    # jobtracker/generation.py passes TailorResult.letter_paragraphs (a
+    # list) directly rather than joining it into a string -- a paragraph
+    # that itself happens to contain a newline must survive as ONE
+    # paragraph, not get split into two.
+    candidate = load_candidate(EXAMPLE_PATH)
+    job = {"title": "Data Engineer", "company": "Acme"}
+    paragraphs = ["Para one.", "Para two\nwith an internal newline.", "Para three."]
+    ctx = letter_render_context(candidate, job, paragraphs, "en")
+    assert ctx["body_paragraphs"] == paragraphs
+    print("PASS test_letter_render_context_accepts_a_paragraph_list_without_resplitting")
+
+
 def test_letter_render_context_falls_back_to_english_for_unknown_lang():
     candidate = load_candidate(EXAMPLE_PATH)
     job = {"title": "Data Engineer", "company": "Acme"}
@@ -239,6 +252,7 @@ if __name__ == "__main__":
     test_cv_render_context_from_tailor_result_selects_and_orders()
     test_cv_render_context_from_tailor_result_skips_stale_ids()
     test_letter_render_context_builds_paragraphs_from_body()
+    test_letter_render_context_accepts_a_paragraph_list_without_resplitting()
     test_letter_render_context_falls_back_to_english_for_unknown_lang()
     test_build_cv_docx_renders_both_languages_without_leftover_tags()
     test_build_letter_docx_renders_both_languages_without_leftover_tags()

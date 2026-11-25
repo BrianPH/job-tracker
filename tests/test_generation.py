@@ -10,7 +10,12 @@ from pathlib import Path
 import docx
 import yaml
 
-from jobtracker.generation import apply_handoff_upload, generate_or_handoff
+from jobtracker.generation import (
+    HANDOFF_STATUS,
+    apply_handoff_upload,
+    generate_or_handoff,
+    write_handoff_request,
+)
 from jobtracker.generation_schema import AnalysisResult, TailorResult
 from jobtracker.tailor import CreditBalanceError
 
@@ -204,6 +209,9 @@ def test_generate_or_handoff_persistent_validation_errors_trigger_handoff():
         result = generate_or_handoff(JOB, candidate=CANDIDATE, out_dir=out, client=client)
         assert result["state"] == "handoff"
         assert "no-such-bullet" in result["error"]
+        # analyse + first tailor attempt + the one retry -- proves the
+        # retry actually happened, not just that the end state is "handoff"
+        assert len(client.messages.captured) == 3
         print("PASS test_generate_or_handoff_persistent_validation_errors_trigger_handoff")
     _with_tmp_out(run)
 
@@ -211,16 +219,87 @@ def test_generate_or_handoff_persistent_validation_errors_trigger_handoff():
 # --------------------------------------------------------------------------- #
 # apply_handoff_upload                                                       #
 # --------------------------------------------------------------------------- #
-def test_apply_handoff_upload_valid_renders_and_clears_status():
+def test_apply_handoff_upload_valid_restores_the_pre_handoff_status():
     def run(out):
+        # A real handoff writer would have recorded what the status was
+        # BEFORE it flipped to HANDOFF_STATUS -- the upload must restore
+        # that, not a hardcoded "New" that would clobber e.g. "Reviewing".
+        job = {**JOB, "status": HANDOFF_STATUS}
+        write_handoff_request(job, CANDIDATE, "en", "boom", out_dir=out)
+        job["status"] = HANDOFF_STATUS  # simulate the status write that really happened
+
         statuses = []
         generation_json = _good_tailor_result().model_dump()
-        result = apply_handoff_upload(JOB, generation_json, candidate=CANDIDATE, out_dir=out,
+        result = apply_handoff_upload(job, generation_json, candidate=CANDIDATE, out_dir=out,
                                       set_status=statuses.append)
         assert result["state"] == "done"
         assert result["cv"].exists() and result["letter"].exists()
-        assert statuses == ["New"]
-        print("PASS test_apply_handoff_upload_valid_renders_and_clears_status")
+        assert statuses == ["New"]  # job had no status before the handoff -> defaults to "New"
+        print("PASS test_apply_handoff_upload_valid_restores_the_pre_handoff_status")
+    _with_tmp_out(run)
+
+
+def test_apply_handoff_upload_valid_restores_a_non_default_previous_status():
+    def run(out):
+        job = {**JOB, "status": "Reviewing"}
+        write_handoff_request(job, CANDIDATE, "en", "boom", out_dir=out)
+        job["status"] = HANDOFF_STATUS  # the write above would have done this for real
+
+        statuses = []
+        generation_json = _good_tailor_result().model_dump()
+        apply_handoff_upload(job, generation_json, candidate=CANDIDATE, out_dir=out,
+                             set_status=statuses.append)
+        assert statuses == ["Reviewing"]
+        print("PASS test_apply_handoff_upload_valid_restores_a_non_default_previous_status")
+    _with_tmp_out(run)
+
+
+def test_apply_handoff_upload_leaves_status_untouched_when_not_in_handoff():
+    # An upload for a job that was never actually handed off (status isn't
+    # HANDOFF_STATUS) must not touch status at all.
+    def run(out):
+        job = {**JOB, "status": "New"}
+        statuses = []
+        generation_json = _good_tailor_result().model_dump()
+        apply_handoff_upload(job, generation_json, candidate=CANDIDATE, out_dir=out,
+                             set_status=statuses.append)
+        assert statuses == []
+        print("PASS test_apply_handoff_upload_leaves_status_untouched_when_not_in_handoff")
+    _with_tmp_out(run)
+
+
+def test_generate_or_handoff_restores_previous_status_on_a_successful_retry():
+    def run(out):
+        job = {**JOB, "status": "Reviewing"}
+        write_handoff_request(job, CANDIDATE, "en", "boom", out_dir=out)
+        job["status"] = HANDOFF_STATUS
+
+        analysis = AnalysisResult(language="en", requirements=["Python"])
+        client = _QueuedClient([_FakeResponse(analysis), _FakeResponse(_good_tailor_result())])
+        statuses = []
+        result = generate_or_handoff(job, candidate=CANDIDATE, out_dir=out, client=client,
+                                     set_status=statuses.append)
+        assert result["state"] == "done"
+        assert statuses == ["Reviewing"]
+        print("PASS test_generate_or_handoff_restores_previous_status_on_a_successful_retry")
+    _with_tmp_out(run)
+
+
+def test_write_handoff_request_preserves_previous_status_across_repeat_failures():
+    # A second consecutive failure (the job is already in HANDOFF_STATUS
+    # when this handoff is written) must not overwrite the recorded
+    # previous_status with HANDOFF_STATUS itself -- that would permanently
+    # lose the real original status.
+    def run(out):
+        job = {**JOB, "status": "Reviewing"}
+        path = write_handoff_request(job, CANDIDATE, "en", "first failure", out_dir=out)
+        job["status"] = HANDOFF_STATUS
+
+        write_handoff_request(job, CANDIDATE, "en", "second failure", out_dir=out)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["previous_status"] == "Reviewing"
+        assert payload["error"] == "second failure"
+        print("PASS test_write_handoff_request_preserves_previous_status_across_repeat_failures")
     _with_tmp_out(run)
 
 
@@ -260,7 +339,11 @@ if __name__ == "__main__":
     test_generate_or_handoff_rate_limit_exhausted_triggers_handoff()
     test_generate_or_handoff_truncated_tailor_reply_triggers_handoff()
     test_generate_or_handoff_persistent_validation_errors_trigger_handoff()
-    test_apply_handoff_upload_valid_renders_and_clears_status()
+    test_generate_or_handoff_restores_previous_status_on_a_successful_retry()
+    test_apply_handoff_upload_valid_restores_the_pre_handoff_status()
+    test_apply_handoff_upload_valid_restores_a_non_default_previous_status()
+    test_apply_handoff_upload_leaves_status_untouched_when_not_in_handoff()
     test_apply_handoff_upload_invalid_shape_renders_nothing()
     test_apply_handoff_upload_invalid_ids_renders_nothing()
+    test_write_handoff_request_preserves_previous_status_across_repeat_failures()
     print("\nAll generation tests passed.")

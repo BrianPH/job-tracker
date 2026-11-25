@@ -141,7 +141,15 @@ def cv_render_context(candidate: dict, summary: str, lang: str) -> dict:
     without touching this code. Non-dict entries (a malformed candidate.yaml,
     e.g. a plain string where a {name: ...} dict is expected) are skipped
     rather than crashing -- load_candidate()'s only validation is "is this
-    YAML", so a typo here shouldn't take down generation entirely."""
+    YAML", so a typo here shouldn't take down generation entirely.
+
+    Dumps ALL of candidate.yaml, unfiltered -- the live generation path
+    (jobtracker/generation.py) uses cv_render_context_from_tailor_result
+    instead, which selects/orders from a TailorResult. This function has no
+    production caller as of issue #11/M3b; it's kept as the full-dump
+    reference for what keys a CV template expects, and its own tests cover
+    the language-fallback/malformed-entry behaviour shared with that
+    function."""
     p = _personal(candidate)
     experience = []
     for e in candidate.get("experience", []):
@@ -222,11 +230,18 @@ def cv_render_context_from_tailor_result(candidate: dict, result, lang: str) -> 
     }
 
 
-def letter_render_context(candidate: dict, job: dict, body: str, lang: str) -> dict:
+def letter_render_context(candidate: dict, job: dict, body, lang: str) -> dict:
+    """`body` is either a plain string (paragraphs separated by "\\n", split
+    here) or a list of paragraphs already split (what
+    jobtracker/generation.py passes -- a TailorResult's `letter_paragraphs`
+    joined and re-split on "\\n" would silently merge into one paragraph
+    any paragraph that itself contains a newline, so the live path passes
+    the list directly instead of round-tripping through a joined string)."""
     p = _personal(candidate)
     labels = LETTER_LABELS.get(lang, LETTER_LABELS["en"])
     salutation = labels["salutation"] if lang == "nl" else f"Dear {job.get('company','')} team,"
-    body_paragraphs = [b.strip() for b in body.split("\n") if b.strip()]
+    paragraphs = body.split("\n") if isinstance(body, str) else body
+    body_paragraphs = [b.strip() for b in paragraphs if b and b.strip()]
     return {
         "name": p.get("name", ""), "email": p.get("email", ""), "phone": p.get("phone", ""),
         "date_line": datetime.date.today().strftime(labels["date_fmt"]),
@@ -238,11 +253,13 @@ def letter_render_context(candidate: dict, job: dict, body: str, lang: str) -> d
 
 
 def build_cv_docx(context: dict, lang: str, path: Path) -> Path:
-    """Takes an already-built render context (cv_render_context or
-    cv_render_context_from_tailor_result, issue #11/M3b) rather than
-    building one itself -- decouples "which context" from "how to render
-    it" so both the old full-dump context and the new TailorResult-selected
-    one go through the same rendering code."""
+    """Takes an already-built render context rather than building one
+    itself -- decouples "which context" from "how to render it". The live
+    generation path (jobtracker/generation.py) passes a
+    `cv_render_context_from_tailor_result` context; `cv_render_context`'s
+    full-dump context (test-only now, see that function's docstring) goes
+    through the same rendering code without this function needing to know
+    the difference."""
     from docxtpl import DocxTemplate
     template = CV_TEMPLATE_PATHS.get(lang, CV_TEMPLATE_PATHS["en"])
     doc = DocxTemplate(str(template))

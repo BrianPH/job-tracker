@@ -117,8 +117,12 @@ render time), so they're tracked in the repo and ship with a minimal
 placeholder design. Swap in your own Word design by replacing these files
 with the same Jinja tags; no code change is needed. The exact tags each
 template expects are defined by `jobtracker/generator.py`'s
-`cv_render_context`/`letter_render_context` (the data passed to the
-template at render time).
+`cv_render_context_from_tailor_result`/`letter_render_context` (the data
+the live generation path actually passes to the template at render time).
+`cv_render_context` builds the same keys from the full, unfiltered
+candidate.yaml instead of a `TailorResult`'s selection — no longer called
+by the live path, but kept as that full-dump reference and exercised by
+its own tests.
 
 The four placeholder `.docx` files are generated, not hand-edited —
 `build_templates.py` is the single source for their content. Regenerate
@@ -174,12 +178,14 @@ checks every bullet, role, skill, and requirement-evidence id against
 generation. These are blocking checks: a failure here means the result must
 not be rendered. If the first tailor reply fails this check, `tailor.py`
 retries once with the specific validation errors appended to the prompt
-before giving up. A second, non-blocking check (`ground_tailor_result`)
-flags — without blocking on — word counts outside the prompt's target
+before giving up. A second, non-blocking check (`ground_tailor_result`) exists for the same
+purpose without blocking on it — word counts outside the prompt's target
 range, an explicit "N years of experience" claim, and a number, year, or
 capitalized word in the free text that does not appear anywhere in
-`candidate.yaml`'s facts. This catches cases where the model invents
-something despite the "never invent facts" instruction.
+`candidate.yaml`'s facts, catching cases where the model invents something
+despite the "never invent facts" instruction — but **no caller invokes it
+yet**: its warnings are not currently computed or shown anywhere. Wiring it
+into a review page is tracked as part of issue #12 below.
 
 **JSON handoff on failure.** If the pipeline cannot produce a usable result
 — no `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` configured, the account has
