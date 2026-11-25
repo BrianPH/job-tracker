@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .generator import OUTPUT_DIR, generate_application
-from .ingest import ThinContentError, ingest_url
+from .ingest import IngestInputError, ThinContentError, ingest_url
 from .pipeline import ROOT, load_env, load_profile, run_pipeline
 from .storage import make_store
 
@@ -170,11 +170,16 @@ def ingest_submit(background_tasks: BackgroundTasks,
                   url: str = Form(""), paste_text: str = Form("")):
     try:
         job = ingest_url(url, paste_text or None)
-    except ThinContentError:
+    except ThinContentError as e:
+        print(f"  [ingest] thin content for {e.url} ({len(e.raw_html)} raw chars fetched)")
         params = urlencode({"error": "thin", "url": url})
         return RedirectResponse(f"/ingest/error?{params}", status_code=303)
-    except ValueError as e:
-        # user input error (e.g. neither url nor paste_text given) -- safe to show as-is
+    except IngestInputError as e:
+        # user input error (neither url nor paste_text given) -- safe to show as-is.
+        # Deliberately NOT a bare `except ValueError`: several requests.exceptions
+        # classes (MissingSchema, InvalidSchema, InvalidURL -- e.g. a URL pasted
+        # without "https://") also subclass ValueError, and their messages are
+        # library-internal wording that must go through the generic branch below.
         params = urlencode({"error": str(e), "url": url})
         return RedirectResponse(f"/ingest/error?{params}", status_code=303)
     except Exception as e:  # noqa: BLE001 - don't reflect raw exception text into the page
