@@ -62,9 +62,13 @@ python -m tests.test_webapp
   as their own keyword instead.
 - **Scrape nu** — run the whole pipeline in the background; live log at
   `/scrape/log`.
-- **CV + brief** — per vacancy, generates a tailored CV and motivation letter
-  (.docx) in `applications/<Company>_<Title>/`. Dutch or English is
-  auto-detected from the vacancy text.
+- **CV + brief** — per vacancy, runs the analyse/tailor pipeline and opens a
+  review page before anything is written: edit the profile/letter text,
+  toggle which bullets render, optionally regenerate, then render to produce
+  the tailored CV and motivation letter (.docx) in
+  `applications/<Company>_<Title>/`. Dutch or English is auto-detected from
+  the vacancy text. See [Analyse + tailor pipeline](#analyse--tailor-pipeline)
+  and [Review page](#review-page) below.
 - **Vanaf URL** (`/ingest`) — generate a CV + brief for a vacancy that was
   never scraped: paste its URL (or the vacancy text itself) and a tailored
   CV/letter is generated the same way as for a scraped job. See
@@ -178,20 +182,56 @@ checks every bullet, role, skill, and requirement-evidence id against
 generation. These are blocking checks: a failure here means the result must
 not be rendered. If the first tailor reply fails this check, `tailor.py`
 retries once with the specific validation errors appended to the prompt
-before giving up. A second, non-blocking check (`ground_tailor_result`) exists for the same
-purpose without blocking on it — word counts outside the prompt's target
-range, an explicit "N years of experience" claim, and a number, year, or
-capitalized word in the free text that does not appear anywhere in
-`candidate.yaml`'s facts, catching cases where the model invents something
-despite the "never invent facts" instruction — but **no caller invokes it
-yet**: its warnings are not currently computed or shown anywhere. Wiring it
-into a review page is tracked under "Generation review page" in the
-Roadmap below (issue #12).
+before giving up. A second, non-blocking check (`ground_tailor_result`)
+exists for the same purpose without blocking on it — word counts outside
+the prompt's target range, an explicit "N years of experience" claim, and a
+number, year, or capitalized word in the free text that does not appear
+anywhere in `candidate.yaml`'s facts, catching cases where the model
+invents something despite the "never invent facts" instruction.
+`tailor.allowed_terms(job, analysis)` feeds this check's
+`extra_allowed_terms` so the vacancy's own company name and keywords — which
+`TAILOR_SYSTEM` explicitly tells the model to connect the candidate's
+experience to — don't themselves flag as unverified; a multi-word keyword
+(e.g. "Azure DevOps") is also split into its individual words, since the
+check matches one capitalized token at a time. The warnings are shown on
+the review page below, never blocking rendering.
 
-**JSON handoff on failure.** If the pipeline cannot produce a usable result
-— no `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` configured, the account has
-no API credit left, the reply is truncated, or it still fails validation
-after the one retry — job-tracker never falls back to a generic template.
+Both the two-step Claude API pipeline and the live-API call path were
+exercised end to end for the first time while building the review page
+below (issue #12's own acceptance criteria) — against a real vacancy, which
+also caught and fixed two bugs no mocked test could: Sonnet 5's default
+adaptive thinking was silently consuming the `max_tokens` budget before the
+structured reply itself, truncating it well under `TAILOR_MAX_TOKENS`
+(fixed by disabling thinking explicitly — neither call needs extended
+reasoning), and the multi-word-keyword grounding gap above.
+
+### Review page
+
+Neither a successful live tailor call nor an uploaded `generation.json`
+(the JSON handoff below) renders a `.docx` file directly — both produce a
+**draft** and open `/jobs/{id}/review`, so nothing reaches a `.docx` file,
+let alone an employer, unseen:
+
+- A requirement → evidence table from `TailorResult.requirement_map`, and
+  the `ground_tailor_result` warnings above, both read-only.
+- Editable `<textarea>`s for the CV profile paragraph and the letter body.
+- One checkbox per bullet in each selected role's **full** bullet bank —
+  pre-checked for whatever the tailor call selected, so you can add a
+  bullet it skipped or drop one it picked, not just prune its choices.
+- **Regenerate**: re-runs only the tailor call against the *same* analysis
+  (no re-ingest, no re-analyse) — available whenever the draft has an
+  analysis to reuse, which an uploaded `generation.json` has too whenever
+  its `request.json` recorded one (i.e. the analyse step had already
+  succeeded before the live call failed).
+- **Render**: writes the `.docx` files from whatever is currently in the
+  form — the only action in the whole pipeline that writes to disk.
+
+### JSON handoff on failure
+
+If the pipeline cannot produce a usable result — no
+`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` configured, the account has no
+API credit left, the reply is truncated, or it still fails validation after
+the one retry — job-tracker never falls back to a generic template.
 Instead it writes `applications/<Company>_<Title>/request.json` (the
 vacancy, the analysis if that step already succeeded, the candidate's facts,
 the exact system prompts, and the `TailorResult` JSON schema) and sets the
@@ -206,13 +246,15 @@ appears as a selectable status on the job board. From there:
    or paste `request.json`'s contents into claude.ai by hand and save its
    reply as `generation.json` in the same way.
 3. Upload `generation.json` from the job row. It goes through the *exact
-   same* `validate_tailor_result` check a live reply would: an id that does
+   same* `validate_tailor_result` check a live reply would — an id that does
    not exist in `candidate.yaml` is rejected with a clear error and nothing
-   is rendered, rather than silently passing through.
+   is rendered — and, on success, opens the review page above, exactly like
+   a successful live call.
 
-This module is unit-tested (`tests/test_tailor.py`, `tests/test_generation.py`)
-against a mocked SDK client and against hand-built `TailorResult`/upload
-payloads — no live Claude API call is made in tests.
+This module is unit-tested (`tests/test_tailor.py`, `tests/test_generation.py`,
+`tests/test_webapp.py`) against a mocked SDK client and against hand-built
+`TailorResult`/upload payloads for day-to-day runs; see the previous
+paragraph for what the one live-API run so far was for.
 
 A `generation_records` store (`jobtracker/generation_records.py`) exists for
 per-call token-usage/stop-reason auditing, but no caller populates it yet —
@@ -480,9 +522,11 @@ config/profile.yaml ───┘       ▲                                      
   calls, using the official SDK's structured outputs so a reply always
   parses into the schema above; also builds the JSON-handoff request content.
 - `jobtracker/generation.py` — orchestrates `tailor.py` and `generator.py`
-  for one job: runs the analyse/tailor pipeline and renders the result, or
-  on any unrecovered failure writes the `request.json` handoff and flips the
-  job's status. The only generation entry point `jobtracker/webapp.py` calls.
+  for one job: runs the analyse/tailor pipeline into a draft for the review
+  page (`regenerate()` re-runs just the tailor step; `render_draft()` is the
+  only function that writes `.docx` files), or on any unrecovered failure
+  writes the `request.json` handoff and flips the job's status. The only
+  generation entry points `jobtracker/webapp.py` calls.
 - `jobtracker/generation_records.py` — `generation_records` storage (model
   id, token usage, stop_reason, raw response) per analyse/tailor call.
 - `jobtracker/ingest.py` — generate from a bare URL/pasted text: known-platform
@@ -514,6 +558,6 @@ config/profile.yaml ───┘       ▲                                      
 - [x] Analyse + tailor Claude API pipeline, wired into the web UI
 - [x] JSON handoff (request.json/generation.json) when the Claude API call
       fails, replacing the old silent template fallback
-- [ ] Generation review page: requirement map, edit, regenerate, render
+- [x] Generation review page: requirement map, edit, regenerate, render
 - [ ] E-mail/Slack digest of new high-score matches
 - [ ] Playwright-based adapter for JS-rendered career sites
