@@ -45,3 +45,20 @@ CREATE TABLE IF NOT EXISTS vacancy_snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS vacancy_snapshots_job_idx ON vacancy_snapshots (job_id);
+
+-- One row per analyse/tailor Claude API call (issue #10), so model id,
+-- token usage, stop_reason, and the raw response are auditable per job --
+-- not just printed to the console.
+CREATE TABLE IF NOT EXISTS generation_records (
+    record_id       TEXT PRIMARY KEY,
+    job_id          TEXT NOT NULL,
+    stage           TEXT NOT NULL,  -- 'analyse' | 'tailor'
+    model           TEXT NOT NULL,
+    stop_reason     TEXT,
+    input_tokens    INTEGER,
+    output_tokens   INTEGER,
+    raw_response    JSONB,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS generation_records_job_idx ON generation_records (job_id);

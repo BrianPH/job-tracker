@@ -183,6 +183,7 @@ cython_debug/
 
 Solliciteren/
 Applications/
+data/
 config/*
 !config/*.example.yaml
 # docxtpl .docx templates hold layout + Jinja placeholders, never personal
