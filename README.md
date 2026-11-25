@@ -110,10 +110,21 @@ layout built in Python. Unlike the other `config/` files, these templates
 hold no personal data (the facts are injected from `candidate.yaml` at
 render time), so they're tracked in the repo and ship with a minimal
 placeholder design. Swap in your own Word design by replacing these files
-with the same Jinja tags; no code change is needed. See the placeholder
-files themselves for the exact tags each template expects
-(`jobtracker/generator.py`'s `cv_render_context`/`letter_render_context`
-build the data passed to them).
+with the same Jinja tags; no code change is needed. The exact tags each
+template expects are defined by `jobtracker/generator.py`'s
+`cv_render_context`/`letter_render_context` (the data passed to the
+template at render time).
+
+The four placeholder `.docx` files are generated, not hand-edited —
+`build_templates.py` is the single source for their content. Regenerate
+and commit the result after any layout change there, rather than editing
+the binaries directly, so they stay reproducible and diffable in spirit
+(even though the committed files themselves are binary, the script that
+produces them is reviewable):
+
+```bash
+python build_templates.py
+```
 
 ### One-time import helper
 
@@ -388,6 +399,8 @@ config/profile.yaml ───┘       ▲                                      
   (and tune its `link_pattern`) before adding it to `companies.yaml`.
 - `import_candidate.py` — stand-alone CLI, draft `candidate.yaml` from your
   CV text (see [One-time import helper](#one-time-import-helper)).
+- `build_templates.py` — regenerates the placeholder `config/templates/*.docx`
+  files (see [Document layout](#document-layout-docxtpl-templates)).
 
 ## Roadmap
 
