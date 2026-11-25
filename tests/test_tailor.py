@@ -142,6 +142,10 @@ def test_analyse_vacancy_valid_response():
     assert result is analysis
     assert client.captured[0]["output_format"] is AnalysisResult
     assert "Build pipelines" in client.captured[0]["messages"][0]["content"]
+    # issue #12's manual live-API check found Sonnet 5's default adaptive
+    # thinking truncating a real tailor reply well under TAILOR_MAX_TOKENS --
+    # thinking must stay explicitly disabled on both calls.
+    assert client.captured[0]["thinking"] == {"type": "disabled"}
     print("PASS test_analyse_vacancy_valid_response")
 
 
@@ -214,6 +218,7 @@ def test_tailor_application_valid_response():
     assert "examplecorp" in kwargs["messages"][0]["content"]  # bullet bank reached the prompt
     assert "Data Engineer" in kwargs["messages"][0]["content"]
     assert "example-university" in kwargs["messages"][0]["content"]  # education ids too
+    assert kwargs["thinking"] == {"type": "disabled"}
     print("PASS test_tailor_application_valid_response")
 
 
