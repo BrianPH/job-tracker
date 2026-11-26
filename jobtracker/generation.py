@@ -197,10 +197,13 @@ def _load_handoff_context(job: dict, candidate: dict, lang: str,
         return None, ""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        analysis_data = payload.get("analysis")
+        analysis = AnalysisResult.model_validate(analysis_data) if analysis_data else None
+    except (OSError, json.JSONDecodeError, ValidationError):
+        # An older/different request.json schema must not turn an
+        # otherwise-successful upload into a crash -- Regenerate just
+        # isn't available for this draft, same as the missing-file case.
         return None, ""
-    analysis_data = payload.get("analysis")
-    analysis = AnalysisResult.model_validate(analysis_data) if analysis_data else None
     return analysis, payload.get("style_example", "")
 
 

@@ -5,6 +5,7 @@
   <p><b>{{ job.title }}</b>{% if job.company %} — {{ job.company }}{% endif %}</p>
   {% if job.url %}<p><a href="{{ job.url }}" target="_blank" rel="noopener">{{ job.url }}</a></p>{% endif %}
   <p class="muted">Niets wordt verzonden of opgeslagen voordat je op "Render" klikt.</p>
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
 </div>
 
 {% if requirement_map %}

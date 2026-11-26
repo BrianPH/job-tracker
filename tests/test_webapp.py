@@ -312,6 +312,18 @@ def main():
         assert webapp.DRAFTS["test:1"]["result"] is regenerated
         print("PASS regenerate updates the stored draft")
 
+        # A second regenerate while one is already in flight for this job
+        # must not fire a second paid API call (double-click race).
+        webapp._REGENERATING.add("test:1")
+        try:
+            with patch("jobtracker.webapp.generation.regenerate") as mock_regen:
+                r = client.post("/jobs/test:1/review/regenerate", follow_redirects=False)
+            mock_regen.assert_not_called()
+        finally:
+            webapp._REGENERATING.discard("test:1")
+        assert r.status_code == 303
+        print("PASS a regenerate already in flight for this job blocks a second one")
+
         with patch("jobtracker.webapp.generation.regenerate",
                   lambda *a, **kw: {"state": "handoff", "request_path": Path("/tmp/x.json"),
                                     "error": "no credit"}):
@@ -320,6 +332,8 @@ def main():
         assert "test:1" not in webapp.DRAFTS
         assert webapp.GENERATION["test:1"]["state"] == "handoff"
         print("PASS regenerate hitting an SDK failure hands off instead of leaving a stale draft")
+
+        draft["analysis"] = None  # reset the earlier sentinel object() back to a real value
 
         # Render: edits + bullet selection actually reach generation.render_draft,
         # and the draft is cleared afterward.
@@ -338,7 +352,55 @@ def main():
         assert "Edited paragraph one." in letter_text
         cv_text = "\n".join(p.text for p in docx.Document(str(cv_path)).paragraphs)
         assert "An edited profile." in cv_text
+        # the central claim of the review page: the CHECKED bullet (CI/CD)
+        # reaches the document, and the draft's ORIGINAL bullet (pipelines
+        # -- unchecked in this submission) does not.
+        assert "Set up CI/CD pipelines with Docker and GitHub Actions" in cv_text
+        assert "Built and maintained Python data pipelines" not in cv_text
         print("PASS review render applies edits, writes .docx, and clears the draft")
+
+        # Real browsers normalize textarea newlines to CRLF on submit --
+        # the paragraph split must not leave literal \r\n embedded.
+        webapp.DRAFTS["test:1"] = draft
+        webapp.GENERATION["test:1"] = {"state": "draft", "files": []}
+        r = client.post("/jobs/test:1/review/render", data={
+            "profile": "An edited profile.",
+            "letter": "Para one.\r\n\r\nPara two.\r\n\r\nPara three.",
+            "bullets": [],
+        }, follow_redirects=False)
+        assert r.status_code == 303 and webapp.GENERATION["test:1"]["state"] == "done"
+        cv_path, letter_path = [test_out_dir / p for p in webapp.GENERATION["test:1"]["files"]]
+        letter_text = "\n".join(p.text for p in docx.Document(str(letter_path)).paragraphs)
+        assert "\r" not in letter_text
+        assert "Para one." in letter_text and "Para two." in letter_text
+        assert "Para three." in letter_text
+        print("PASS review render splits CRLF-normalized textarea input into separate paragraphs")
+
+        # Empty profile/letter must not 422 or silently render a bodyless
+        # document -- redirect back to the review page with the draft intact.
+        webapp.DRAFTS["test:1"] = draft
+        webapp.GENERATION["test:1"] = {"state": "draft", "files": []}
+        r = client.post("/jobs/test:1/review/render",
+                        data={"profile": "", "letter": "", "bullets": []},
+                        follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"].startswith("/jobs/test:1/review")
+        assert "test:1" in webapp.DRAFTS  # draft survives, nothing was rendered
+        assert webapp.GENERATION["test:1"]["state"] == "draft"
+        r = client.get(r.headers["location"])
+        assert r.status_code == 200 and "niet leeg zijn" in r.text
+        print("PASS an empty render submission is rejected instead of 422ing or rendering nothing")
+
+        # A stale draft from a previous (now-superseded) generation must not
+        # survive a fresh "Genereer CV + brief" click -- otherwise GET
+        # /jobs/{id}/review (or Render) could still serve/write it during
+        # the window before the new background run finishes.
+        webapp.DRAFTS["test:1"] = draft
+        webapp.GENERATION["test:1"] = {"state": "draft", "files": []}
+        with patch("jobtracker.webapp._generate_worker"):  # don't actually run it
+            r = client.post("/jobs/test:1/generate", follow_redirects=False)
+        assert r.status_code == 303
+        assert "test:1" not in webapp.DRAFTS
+        print("PASS a new generate() call clears any stale draft immediately")
 
     print("\nAll webapp tests passed.")
 

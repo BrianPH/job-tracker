@@ -13,6 +13,7 @@ import yaml
 
 from jobtracker.generation import (
     HANDOFF_STATUS,
+    _request_path,
     apply_handoff_upload,
     generate_or_handoff,
     regenerate,
@@ -277,6 +278,27 @@ def test_apply_handoff_upload_without_request_json_has_no_analysis():
     _with_tmp_out(run)
 
 
+def test_apply_handoff_upload_tolerates_a_malformed_analysis_in_request_json():
+    # An older/different request.json schema (or hand-edited file) with an
+    # "analysis" block that no longer matches AnalysisResult must not turn
+    # an otherwise-valid upload into a crash -- Regenerate just isn't
+    # available for that draft, same as a missing request.json.
+    def run(out):
+        job = {**JOB, "status": HANDOFF_STATUS}
+        write_handoff_request(job, CANDIDATE, "en", "boom", out_dir=out)
+        path = _request_path(job, CANDIDATE, "en", out)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["analysis"] = {"not": "a valid AnalysisResult shape"}
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        result = apply_handoff_upload(job, _good_tailor_result().model_dump(),
+                                      candidate=CANDIDATE, out_dir=out)
+        assert result["state"] == "draft"
+        assert result["analysis"] is None
+        print("PASS test_apply_handoff_upload_tolerates_a_malformed_analysis_in_request_json")
+    _with_tmp_out(run)
+
+
 def test_apply_handoff_upload_valid_restores_a_non_default_previous_status():
     def run(out):
         job = {**JOB, "status": "Reviewing"}
@@ -484,6 +506,7 @@ if __name__ == "__main__":
     test_apply_handoff_upload_valid_produces_a_draft_and_restores_status()
     test_apply_handoff_upload_recovers_analysis_for_regenerate()
     test_apply_handoff_upload_without_request_json_has_no_analysis()
+    test_apply_handoff_upload_tolerates_a_malformed_analysis_in_request_json()
     test_apply_handoff_upload_valid_restores_a_non_default_previous_status()
     test_apply_handoff_upload_leaves_status_untouched_when_not_in_handoff()
     test_apply_handoff_upload_invalid_shape_renders_nothing()

@@ -22,6 +22,7 @@ Features
 from __future__ import annotations
 
 import json
+import re
 import threading
 from pathlib import Path
 from typing import Callable, Optional
@@ -234,6 +235,11 @@ def generate(job_id: str, background_tasks: BackgroundTasks):
         return RedirectResponse("/", status_code=303)
     current = GENERATION.get(job_id, {})
     if current.get("state") != "running":
+        # Drop any stale draft from a PRIOR generation of this job now,
+        # synchronously -- not in the background worker -- so a GET
+        # /jobs/{id}/review in the window before the worker finishes can't
+        # still serve (or Render) a superseded draft.
+        DRAFTS.pop(job_id, None)
         GENERATION[job_id] = {"state": "running", "files": []}
         background_tasks.add_task(_generate_worker, job_id, job)
     return RedirectResponse(_redirect_target(job_id), status_code=303)
@@ -282,8 +288,22 @@ async def generation_upload(job_id: str, generation_file: UploadFile = File(...)
 
 
 # --- generation review page (issue #12) --------------------------------------- #
+_REGENERATING: set = set()  # job_ids currently mid-regenerate -- blocks a double-click race
+
+
 def _bullet_text(bullet: dict, lang: str) -> str:
     return bullet.get(lang) or bullet.get("en") or bullet.get("nl") or ""
+
+
+def _split_letter_paragraphs(text: str) -> list:
+    """Splits the review page's letter textarea into paragraphs on a blank
+    line. Browsers normalize textarea line endings to CRLF on submit (per
+    the HTML spec), so a plain `"\\n\\n"` split leaves every paragraph
+    carrying literal "\\r\\n" instead of actually splitting -- normalize
+    first, then split on one-or-more blank lines regardless of which line
+    ending was used."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return [p.strip() for p in re.split(r"\n{2,}", normalized) if p.strip()]
 
 
 def _review_context(job_id: str, job: dict, draft: dict) -> dict:
@@ -319,18 +339,19 @@ def _review_context(job_id: str, job: dict, draft: dict) -> dict:
         "job": job, "job_id": job_id, "result": result, "roles": role_views,
         "profile_text": result.profile, "letter_text": "\n\n".join(result.letter_paragraphs),
         "requirement_map": result.requirement_map, "notes": result.notes_for_candidate,
-        "warnings": warnings, "can_regenerate": analysis is not None,
+        "warnings": warnings, "can_regenerate": analysis is not None, "error": "",
     }
 
 
 @app.get("/jobs/{job_id}/review", response_class=HTMLResponse)
-def review_page(request: Request, job_id: str):
+def review_page(request: Request, job_id: str, error: str = ""):
     job = _get_job(job_id)
     draft = DRAFTS.get(job_id)
     if job is None or draft is None:
         return RedirectResponse("/", status_code=303)
-    return templates.TemplateResponse(request, "review.html",
-                                      _review_context(job_id, job, draft))
+    ctx = _review_context(job_id, job, draft)
+    ctx["error"] = error
+    return templates.TemplateResponse(request, "review.html", ctx)
 
 
 @app.post("/jobs/{job_id}/review/regenerate")
@@ -340,9 +361,21 @@ def review_regenerate(job_id: str):
     if job is None or draft is None or draft.get("analysis") is None:
         return RedirectResponse(f"/jobs/{job_id}/review", status_code=303)
 
-    result = generation.regenerate(job, draft["analysis"], draft["candidate"],
-                                   draft.get("style_example", ""), out_dir=OUTPUT_DIR,
-                                   set_status=_set_status_fn(job_id))
+    with _LOCK:
+        if job_id in _REGENERATING:
+            # Already mid-regenerate (a double submit) -- don't fire a
+            # second paid API call that would race the first one's write
+            # to this same draft.
+            return RedirectResponse(f"/jobs/{job_id}/review", status_code=303)
+        _REGENERATING.add(job_id)
+    try:
+        result = generation.regenerate(job, draft["analysis"], draft["candidate"],
+                                       draft.get("style_example", ""), out_dir=OUTPUT_DIR,
+                                       set_status=_set_status_fn(job_id))
+    finally:
+        with _LOCK:
+            _REGENERATING.discard(job_id)
+
     if result["state"] == "handoff":
         DRAFTS.pop(job_id, None)
         GENERATION[job_id] = {"state": "handoff", "error": result["error"],
@@ -354,21 +387,29 @@ def review_regenerate(job_id: str):
 
 
 @app.post("/jobs/{job_id}/review/render")
-def review_render(job_id: str, profile: str = Form(...), letter: str = Form(...),
+def review_render(job_id: str, profile: str = Form(""), letter: str = Form(""),
                   bullets: list = Form([])):
     job = _get_job(job_id)
     draft = DRAFTS.get(job_id)
     if job is None or draft is None:
         return RedirectResponse("/", status_code=303)
 
+    profile = profile.strip()
+    letter_paragraphs = _split_letter_paragraphs(letter)
+    if not profile or not letter_paragraphs:
+        # Same blocking condition validate_tailor_result enforces on a live
+        # reply (empty letter_paragraphs) -- an empty submission must not
+        # silently render a document with no body/profile.
+        params = urlencode({"error": "Profieltekst en brief mogen niet leeg zijn."})
+        return RedirectResponse(f"/jobs/{job_id}/review?{params}", status_code=303)
+
     bullets_by_role: dict = {}
     for item in bullets:
         role_id, _, bullet_id = item.partition("::")
         if role_id and bullet_id:
             bullets_by_role.setdefault(role_id, []).append(bullet_id)
-    letter_paragraphs = [p.strip() for p in letter.split("\n\n") if p.strip()]
 
-    result = generation.render_draft(draft, profile.strip(), letter_paragraphs,
+    result = generation.render_draft(draft, profile, letter_paragraphs,
                                      bullets_by_role, out_dir=OUTPUT_DIR)
     rel = [str(p.relative_to(OUTPUT_DIR)).replace("\\", "/") for p in
            (result["cv"], result["letter"])]
@@ -413,6 +454,7 @@ def ingest_submit(background_tasks: BackgroundTasks,
     ADHOC_JOBS[job_id] = job
     current = GENERATION.get(job_id, {})
     if current.get("state") != "running":
+        DRAFTS.pop(job_id, None)  # same stale-draft guard as generate(), above
         GENERATION[job_id] = {"state": "running", "files": []}
         background_tasks.add_task(_generate_worker, job_id, job)
     return RedirectResponse(f"/ingest?job_id={job_id}", status_code=303)
