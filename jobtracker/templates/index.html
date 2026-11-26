@@ -87,6 +87,8 @@
           <div class="filelinks">
             {% for f in gen.files %}<a href="/applications/{{ f }}">{{ f.split("/")[-1] }}</a>{% endfor %}
           </div>
+        {% elif gen and gen.state == "draft" %}
+          <a href="/jobs/{{ j.job_id }}/review">bekijken &amp; renderen</a>
         {% elif gen and gen.state == "running" %}
           <span class="muted">genereren... (ververs de pagina)</span>
         {% elif gen and gen.state == "handoff" %}

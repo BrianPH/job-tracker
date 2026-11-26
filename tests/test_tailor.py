@@ -142,6 +142,10 @@ def test_analyse_vacancy_valid_response():
     assert result is analysis
     assert client.captured[0]["output_format"] is AnalysisResult
     assert "Build pipelines" in client.captured[0]["messages"][0]["content"]
+    # issue #12's manual live-API check found Sonnet 5's default adaptive
+    # thinking truncating a real tailor reply well under TAILOR_MAX_TOKENS --
+    # thinking must stay explicitly disabled on both calls.
+    assert client.captured[0]["thinking"] == {"type": "disabled"}
     print("PASS test_analyse_vacancy_valid_response")
 
 
@@ -214,6 +218,7 @@ def test_tailor_application_valid_response():
     assert "examplecorp" in kwargs["messages"][0]["content"]  # bullet bank reached the prompt
     assert "Data Engineer" in kwargs["messages"][0]["content"]
     assert "example-university" in kwargs["messages"][0]["content"]  # education ids too
+    assert kwargs["thinking"] == {"type": "disabled"}
     print("PASS test_tailor_application_valid_response")
 
 
@@ -248,6 +253,19 @@ def test_allowed_terms_includes_company_and_keywords():
     assert "Initech" in terms
     assert "Kubernetes" in terms and "AWS" in terms
     print("PASS test_allowed_terms_includes_company_and_keywords")
+
+
+def test_allowed_terms_splits_multi_word_keywords():
+    # ground_tailor_result checks one capitalized token at a time -- a
+    # multi-word keyword like "Azure DevOps" must also allow "Azure" and
+    # "DevOps" individually, or each word of a keyword the letter
+    # legitimately echoes back flags as an unverified fact.
+    job = {"title": "Data Engineer", "company": "Acme", "description": "Build things."}
+    analysis = AnalysisResult(language="en", keywords=["Azure DevOps"])
+    terms = allowed_terms(job, analysis)
+    assert "Azure DevOps" in terms
+    assert "Azure" in terms and "DevOps" in terms
+    print("PASS test_allowed_terms_splits_multi_word_keywords")
 
 
 def test_allowed_terms_skips_missing_company():
@@ -466,6 +484,7 @@ if __name__ == "__main__":
     test_make_client_returns_none_without_api_key()
     test_make_client_accepts_auth_token()
     test_allowed_terms_includes_company_and_keywords()
+    test_allowed_terms_splits_multi_word_keywords()
     test_allowed_terms_skips_missing_company()
     test_analyse_vacancy_caps_vacancy_text_at_desc_chars()
     test_tailor_application_caps_description_at_desc_chars()

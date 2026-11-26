@@ -43,14 +43,19 @@ from .scorer import ANTHROPIC_MODEL_EXTRACT, ANTHROPIC_MODEL_WRITE
 VACANCY_DESC_CHARS = 4000
 
 ANALYSE_MAX_TOKENS = 1024
-# Sonnet 5 runs adaptive thinking by default when `thinking` is omitted, and
-# max_tokens caps thinking + the structured JSON reply together. The
-# TailorResult payload alone (profile, 4-6 letter paragraphs, a
-# requirement_map entry per requirement, notes) runs well over 1000 output
-# tokens before thinking is counted, so a tight budget here risks discarding
-# a paid call to truncation -- generous headroom is worth more than the
-# extra cost of unused tokens.
 TAILOR_MAX_TOKENS = 8192
+# Sonnet 5 runs adaptive thinking by default when `thinking` is omitted, and
+# max_tokens caps thinking + the structured JSON reply together -- confirmed
+# against the live API (issue #12's manual end-to-end check) truncating a
+# real TailorResult reply right at the end of the JSON (stop_reason never
+# even reached "max_tokens": the SDK's own JSON parse failed first, on
+# incomplete JSON) well under TAILOR_MAX_TOKENS, because thinking consumed
+# a large, variable share of the budget first. Neither call benefits from
+# extended reasoning -- both are constrained extraction/selection tasks
+# governed by hard rules in the prompt, not open-ended problems -- so
+# thinking is disabled below rather than padding the budget further and
+# hoping it's enough.
+THINKING_DISABLED = {"type": "disabled"}
 
 
 class GenerationUnavailableError(RuntimeError):
@@ -240,6 +245,7 @@ def analyse_vacancy(vacancy_text: str, client=None, model: Optional[str] = None)
         client,
         model=model,
         max_tokens=ANALYSE_MAX_TOKENS,
+        thinking=THINKING_DISABLED,
         system=ANALYSE_SYSTEM,
         messages=[{"role": "user",
                    "content": f"VACANCY TEXT:\n{(vacancy_text or '')[:VACANCY_DESC_CHARS]}"}],
@@ -294,6 +300,7 @@ def tailor_application(job: dict, analysis: AnalysisResult, candidate: dict,
         client,
         model=model,
         max_tokens=TAILOR_MAX_TOKENS,
+        thinking=THINKING_DISABLED,
         system=system,
         messages=[{"role": "user", "content": user}],
         output_format=TailorResult,
@@ -349,9 +356,14 @@ def allowed_terms(job: dict, analysis: AnalysisResult) -> list:
     """Terms to pass as `generation_schema.ground_tailor_result`'s
     `extra_allowed_terms` -- legitimately not a candidate fact, but also not
     invented, since TAILOR_SYSTEM explicitly tells the model to connect the
-    candidate's experience to this vacancy's company and keywords. A future
-    caller (issue #12) should use this instead of hand-rolling the list, so
-    the one place that knows the prompt also owns what it allows through."""
+    candidate's experience to this vacancy's company and keywords. Used by
+    the review page (issue #12), confirmed live against a real vacancy: a
+    multi-word keyword (e.g. "Azure DevOps") is also split into its
+    individual words, since `ground_tailor_result` checks one capitalized
+    token at a time -- without this, every word of a multi-word keyword
+    the letter legitimately echoes back flags as an unverified fact."""
     terms = [job.get("company", "")]
     terms.extend(analysis.keywords)
-    return [t for t in terms if t]
+    terms = [t for t in terms if t]
+    words = [w for t in terms for w in t.split() if len(t.split()) > 1]
+    return terms + words

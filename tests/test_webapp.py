@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import docx
+
 
 def _seed_store(path: Path):
     jobs = {
@@ -184,21 +186,23 @@ def main():
         finally:
             webapp._store().update_status("test:1", "New")
 
-        fake_cv = test_out_dir / "Acme_Data_Engineer" / "CV_Test.docx"
-        fake_letter = test_out_dir / "Acme_Data_Engineer" / "Cover_Letter.docx"
+        fake_draft = {"state": "draft", "job": {"job_id": "test:1"}, "candidate": {},
+                     "analysis": None, "lang": "en", "style_example": "",
+                     "result": object()}
 
         with patch("jobtracker.webapp.generation.apply_handoff_upload",
-                  lambda job, data, **kw: {"state": "done", "cv": fake_cv,
-                                           "letter": fake_letter, "lang": "en"}):
+                  lambda job, data, **kw: fake_draft):
             files = {"generation_file": ("generation.json", b'{"language": "en"}',
                                          "application/json")}
             r = client.post("/jobs/test:1/generation-upload", files=files, follow_redirects=False)
         assert r.status_code == 303
-        assert webapp.GENERATION["test:1"]["state"] == "done"
-        assert webapp.GENERATION["test:1"]["files"] == [
-            "Acme_Data_Engineer/CV_Test.docx", "Acme_Data_Engineer/Cover_Letter.docx"]
-        print("PASS valid generation.json upload renders and clears the handoff state")
+        assert webapp.GENERATION["test:1"]["state"] == "draft"
+        assert webapp.DRAFTS["test:1"] is fake_draft
+        print("PASS valid generation.json upload produces a draft and clears the handoff state")
 
+        # A stale draft (e.g. from an EARLIER successful upload/generate for
+        # this job_id) must not survive a now-failed re-upload either.
+        webapp.DRAFTS["test:1"] = {"result": "stale"}
         webapp.GENERATION["test:1"] = {"state": "handoff", "error": "no credit", "files": []}
         with patch("jobtracker.webapp.generation.apply_handoff_upload",
                   lambda job, data, **kw: {"state": "invalid", "errors": ["bad bullet id"]}):
@@ -208,7 +212,8 @@ def main():
         assert r.status_code == 303
         assert webapp.GENERATION["test:1"]["state"] == "handoff"
         assert "bad bullet id" in webapp.GENERATION["test:1"]["error"]
-        print("PASS invalid generation.json upload stays in the handoff state with the errors shown")
+        assert "test:1" not in webapp.DRAFTS
+        print("PASS invalid generation.json upload stays in the handoff state and clears any stale draft")
 
         files = {"generation_file": ("generation.json", b"not json at all", "application/json")}
         r = client.post("/jobs/test:1/generation-upload", files=files, follow_redirects=False)
@@ -242,7 +247,8 @@ def main():
             r = client.post("/jobs/test:2/generation-upload", files=files, follow_redirects=False)
             assert r.status_code == 303
             assert json.loads(store_path.read_text())["test:2"]["status"] == "New"
-            assert webapp.GENERATION["test:2"]["state"] == "done"
+            assert webapp.GENERATION["test:2"]["state"] == "draft"
+            assert webapp.DRAFTS["test:2"]["result"].profile == valid_generation_json["profile"]
             print("PASS generation-upload for a DB-backed job restores status via store.update_status")
         finally:
             webapp._store().update_status("test:2", "New")
@@ -257,6 +263,164 @@ def main():
         # must NOT have touched the real job store for an id it has no row for
         assert "ingest:abc123" not in json.loads(store_path.read_text())
         print("PASS generation-upload for an ADHOC job restores status in ADHOC_JOBS, not the store")
+        webapp.DRAFTS.clear()
+
+        # --- review page (issue #12): GET/regenerate/render ---------------- #
+        from jobtracker.generation_schema import TailorResult
+
+        def _sample_result(**overrides):
+            base = dict(
+                language="en", profile="A tailored profile. " * 10,
+                experience_order=["examplecorp"], bullets={"examplecorp": ["examplecorp-pipelines"]},
+                skills=["Python"], letter_paragraphs=["Paragraph one. " * 20, "Paragraph two. " * 20],
+            )
+            base.update(overrides)
+            return TailorResult(**base)
+
+        job1 = webapp._get_job("test:1")
+        draft = {"job": job1, "candidate": webapp.generator.load_candidate(), "analysis": None,
+                "lang": "en", "style_example": "", "result": _sample_result()}
+        webapp.DRAFTS["test:1"] = draft
+        webapp.GENERATION["test:1"] = {"state": "draft", "files": []}
+
+        r = client.get("/jobs/test:1/review")
+        assert r.status_code == 200
+        assert "A tailored profile." in r.text
+        assert 'value="examplecorp::examplecorp-pipelines"' in r.text
+        assert "checked" in r.text
+        print("PASS review page renders the draft's profile, letter, and bullet checkboxes")
+
+        r = client.get("/")
+        assert r.status_code == 200 and f'/jobs/test:1/review">' in r.text
+        print("PASS job board links to the review page while a draft is pending")
+
+        r = client.get("/jobs/unknown-job/review", follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/"
+        print("PASS review page redirects for a job with no draft")
+
+        # Regenerate: no analysis on this draft -> must be a no-op, not call
+        # generation.regenerate at all (it needs the SAME analysis; there
+        # isn't one here).
+        with patch("jobtracker.webapp.generation.regenerate") as mock_regen:
+            r = client.post("/jobs/test:1/review/regenerate", follow_redirects=False)
+        assert r.status_code == 303
+        mock_regen.assert_not_called()
+        print("PASS regenerate without an analysis is a no-op")
+
+        draft["analysis"] = object()  # just needs to be not-None for this check
+        regenerated = _sample_result(profile="A regenerated profile. " * 10)
+        with patch("jobtracker.webapp.generation.regenerate",
+                  lambda *a, **kw: {"state": "draft", "result": regenerated, "errors": []}):
+            r = client.post("/jobs/test:1/review/regenerate", follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/jobs/test:1/review"
+        assert webapp.DRAFTS["test:1"]["result"] is regenerated
+        print("PASS regenerate updates the stored draft")
+
+        # A second regenerate while one is already in flight for this job
+        # must not fire a second paid API call (double-click race).
+        webapp._REGENERATING.add("test:1")
+        try:
+            with patch("jobtracker.webapp.generation.regenerate") as mock_regen:
+                r = client.post("/jobs/test:1/review/regenerate", follow_redirects=False)
+            mock_regen.assert_not_called()
+        finally:
+            webapp._REGENERATING.discard("test:1")
+        assert r.status_code == 303
+        print("PASS a regenerate already in flight for this job blocks a second one")
+
+        with patch("jobtracker.webapp.generation.regenerate",
+                  lambda *a, **kw: {"state": "handoff", "request_path": Path("/tmp/x.json"),
+                                    "error": "no credit"}):
+            r = client.post("/jobs/test:1/review/regenerate", follow_redirects=False)
+        assert r.status_code == 303
+        assert "test:1" not in webapp.DRAFTS
+        assert webapp.GENERATION["test:1"]["state"] == "handoff"
+        print("PASS regenerate hitting an SDK failure hands off instead of leaving a stale draft")
+
+        draft["analysis"] = None  # reset the earlier sentinel object() back to a real value
+
+        # Render: edits + bullet selection actually reach generation.render_draft,
+        # and the draft is cleared afterward.
+        webapp.DRAFTS["test:1"] = draft
+        webapp.GENERATION["test:1"] = {"state": "draft", "files": []}
+        r = client.post("/jobs/test:1/review/render", data={
+            "profile": "An edited profile.",
+            "letter": "Edited paragraph one.\n\nEdited paragraph two.",
+            "bullets": ["examplecorp::examplecorp-cicd"],
+        }, follow_redirects=False)
+        assert r.status_code == 303
+        assert webapp.GENERATION["test:1"]["state"] == "done"
+        assert "test:1" not in webapp.DRAFTS
+        cv_path, letter_path = [test_out_dir / p for p in webapp.GENERATION["test:1"]["files"]]
+        letter_text = "\n".join(p.text for p in docx.Document(str(letter_path)).paragraphs)
+        assert "Edited paragraph one." in letter_text
+        cv_text = "\n".join(p.text for p in docx.Document(str(cv_path)).paragraphs)
+        assert "An edited profile." in cv_text
+        # the central claim of the review page: the CHECKED bullet (CI/CD)
+        # reaches the document, and the draft's ORIGINAL bullet (pipelines
+        # -- unchecked in this submission) does not.
+        assert "Set up CI/CD pipelines with Docker and GitHub Actions" in cv_text
+        assert "Built and maintained Python data pipelines" not in cv_text
+        print("PASS review render applies edits, writes .docx, and clears the draft")
+
+        # Real browsers normalize textarea newlines to CRLF on submit --
+        # the paragraph split must not leave literal \r\n embedded.
+        webapp.DRAFTS["test:1"] = draft
+        webapp.GENERATION["test:1"] = {"state": "draft", "files": []}
+        r = client.post("/jobs/test:1/review/render", data={
+            "profile": "An edited profile.",
+            "letter": "Para one.\r\n\r\nPara two.\r\n\r\nPara three.",
+            "bullets": [],
+        }, follow_redirects=False)
+        assert r.status_code == 303 and webapp.GENERATION["test:1"]["state"] == "done"
+        cv_path, letter_path = [test_out_dir / p for p in webapp.GENERATION["test:1"]["files"]]
+        letter_text = "\n".join(p.text for p in docx.Document(str(letter_path)).paragraphs)
+        assert "\r" not in letter_text
+        assert "Para one." in letter_text and "Para two." in letter_text
+        assert "Para three." in letter_text
+        print("PASS review render splits CRLF-normalized textarea input into separate paragraphs")
+
+        # A "blank" line with a stray space/tab (easy to pick up editing in
+        # a textarea) must still count as the paragraph break.
+        webapp.DRAFTS["test:1"] = draft
+        webapp.GENERATION["test:1"] = {"state": "draft", "files": []}
+        r = client.post("/jobs/test:1/review/render", data={
+            "profile": "An edited profile.",
+            "letter": "Para one.\n \nPara two.",
+            "bullets": [],
+        }, follow_redirects=False)
+        assert r.status_code == 303 and webapp.GENERATION["test:1"]["state"] == "done"
+        cv_path, letter_path = [test_out_dir / p for p in webapp.GENERATION["test:1"]["files"]]
+        body_paragraphs = [p.text.strip() for p in docx.Document(str(letter_path)).paragraphs
+                           if p.text.strip() in ("Para one.", "Para two.")]
+        assert body_paragraphs == ["Para one.", "Para two."]  # two SEPARATE paragraphs, not merged
+        print("PASS a whitespace-only blank line still splits paragraphs")
+
+        # Empty profile/letter must not 422 or silently render a bodyless
+        # document -- redirect back to the review page with the draft intact.
+        webapp.DRAFTS["test:1"] = draft
+        webapp.GENERATION["test:1"] = {"state": "draft", "files": []}
+        r = client.post("/jobs/test:1/review/render",
+                        data={"profile": "", "letter": "", "bullets": []},
+                        follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"].startswith("/jobs/test:1/review")
+        assert "test:1" in webapp.DRAFTS  # draft survives, nothing was rendered
+        assert webapp.GENERATION["test:1"]["state"] == "draft"
+        r = client.get(r.headers["location"])
+        assert r.status_code == 200 and "niet leeg zijn" in r.text
+        print("PASS an empty render submission is rejected instead of 422ing or rendering nothing")
+
+        # A stale draft from a previous (now-superseded) generation must not
+        # survive a fresh "Genereer CV + brief" click -- otherwise GET
+        # /jobs/{id}/review (or Render) could still serve/write it during
+        # the window before the new background run finishes.
+        webapp.DRAFTS["test:1"] = draft
+        webapp.GENERATION["test:1"] = {"state": "draft", "files": []}
+        with patch("jobtracker.webapp._generate_worker"):  # don't actually run it
+            r = client.post("/jobs/test:1/generate", follow_redirects=False)
+        assert r.status_code == 303
+        assert "test:1" not in webapp.DRAFTS
+        print("PASS a new generate() call clears any stale draft immediately")
 
     print("\nAll webapp tests passed.")
 

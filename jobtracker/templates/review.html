@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+  <p><b>{{ job.title }}</b>{% if job.company %} — {{ job.company }}{% endif %}</p>
+  {% if job.url %}<p><a href="{{ job.url }}" target="_blank" rel="noopener">{{ job.url }}</a></p>{% endif %}
+  <p class="muted">Niets wordt verzonden of opgeslagen voordat je op "Render" klikt.</p>
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+</div>
+
+{% if requirement_map %}
+<div class="card">
+  <p><b>Vereisten ↔ onderbouwing</b></p>
+  <table>
+    <tr class="head"><th>Vereiste</th><th>Onderbouwing</th><th>Status</th></tr>
+    {% for r in requirement_map %}
+    <tr>
+      <td>{{ r.requirement }}</td>
+      <td>{{ r.evidence | join(", ") if r.evidence else "—" }}</td>
+      <td>
+        {% if r.status == "met" %}<span class="ok">voldaan</span>
+        {% elif r.status == "partial" %}<span class="muted">deels</span>
+        {% else %}<span class="err">ontbreekt</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if warnings %}
+<div class="card">
+  <p><b>Let op (niet-blokkerend)</b></p>
+  <ul>{% for w in warnings %}<li class="muted">{{ w }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+{% if notes %}
+<div class="card">
+  <p><b>Opmerkingen voor jou</b></p>
+  <ul>{% for n in notes %}<li>{{ n }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<form method="post" action="/jobs/{{ job_id }}/review/render">
+  <div class="card">
+    <label><b>Profieltekst (CV)</b>
+      <textarea name="profile" style="min-height:90px">{{ profile_text }}</textarea>
+    </label>
+    <label><b>Brief</b>
+      <textarea name="letter" style="min-height:220px">{{ letter_text }}</textarea>
+    </label>
+  </div>
+
+  <div class="card">
+    <p><b>Bullets per functie</b> — aangevinkt = geselecteerd door het model, pas aan naar wens.</p>
+    {% for role in roles %}
+    <div style="margin-bottom:14px">
+      <p class="muted">{{ role.title }}{% if role.company %} — {{ role.company }}{% endif %}</p>
+      {% for b in role.bullets %}
+      <label style="display:block; font-weight:normal; margin:2px 0">
+        <input type="checkbox" name="bullets" value="{{ role.role_id }}::{{ b.id }}"
+               {% if b.checked %}checked{% endif %}>
+        {{ b.text }}
+      </label>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+
+  <p><button type="submit">Render (.docx)</button></p>
+</form>
+
+<form method="post" action="/jobs/{{ job_id }}/review/regenerate" class="inline">
+  <button type="submit" {% if not can_regenerate %}disabled{% endif %}
+          title="{% if not can_regenerate %}Geen analyse beschikbaar om opnieuw te taileren (bijv. handoff zonder geslaagde analyse-stap){% endif %}">
+    Regenerate (tailor opnieuw uitvoeren)
+  </button>
+</form>
+
+{% endblock %}
