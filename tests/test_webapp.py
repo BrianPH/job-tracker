@@ -44,7 +44,10 @@ def main():
         """issue #13: generate/regenerate now pass a record_store through
         webapp._record_store() -- patched here (same reasoning as _store()
         above) so no test writes into the real data/generation_records.json
-        on disk. .calls lets individual tests assert what got recorded."""
+        on disk. .calls is asserted by the "real generate() run" test below,
+        which drives a full analyse+tailor call through a fake Anthropic
+        client (most other tests mock generation.* entirely, so .calls
+        would stay empty for them regardless)."""
         def __init__(self):
             self.calls = []
 
@@ -56,6 +59,7 @@ def main():
             return []
 
     fake_record_store = _FakeRecordStore()
+    real_record_store_fn = webapp._record_store  # saved for the "DB down" test below
     webapp._record_store = lambda: fake_record_store
     client = TestClient(webapp.app)
 
@@ -455,6 +459,94 @@ def main():
         r = client.get("/costs")
         assert r.status_code == 200 and "2026-11" in r.text
         print("PASS /costs renders a monthly summary from recorded rows")
+
+        fake_record_store.list_all = lambda: [
+            {"job_id": "test:1", "stage": "tailor", "model": "some-future-model",
+             "input_tokens": 1000, "output_tokens": 500,
+             "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+             "created_at": "2026-11-20T09:00:00+00:00"},
+        ]
+        r = client.get("/costs")
+        assert r.status_code == 200 and "—" in r.text  # unpriced model, not "$0.00"
+        print("PASS /costs renders an em-dash for a model missing from MODEL_PRICING")
+        fake_record_store.list_all = lambda: []
+
+        # --- issue #13 (review fix): a dead generation_records backend must
+        # not break generation or /costs, and a real end-to-end generation
+        # must actually populate the record store ------------------------- #
+        from jobtracker.generation_schema import AnalysisResult
+
+        class _FakeTailorMessages:
+            # generate_or_handoff doesn't thread one client object between
+            # the analyse and tailor calls -- each calls make_client() on
+            # its own, so a fresh _FakeTailorClient is built per call.
+            # Dispatching by output_format (rather than a shared queue
+            # index) is what makes a NEW client instance still answer the
+            # tailor call correctly, not just the first call it happens to
+            # receive.
+            def __init__(self, analysis, tailor_result):
+                self._analysis = analysis
+                self._tailor_result = tailor_result
+
+            def parse(self, **kwargs):
+                parsed = (self._analysis if kwargs.get("output_format") is AnalysisResult
+                         else self._tailor_result)
+                class _Resp:
+                    pass
+                resp = _Resp()
+                resp.parsed_output = parsed
+                resp.stop_reason = "end_turn"
+                resp.usage = type("U", (), {
+                    "input_tokens": 100, "output_tokens": 200,
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0})()
+                resp.to_dict = lambda: {}
+                return resp
+
+        class _FakeTailorClient:
+            def __init__(self, analysis, tailor_result):
+                self.messages = _FakeTailorMessages(analysis, tailor_result)
+
+        def _fake_client(analysis, tailor_result):
+            return _FakeTailorClient(analysis, tailor_result)
+
+        job1 = webapp._get_job("test:1")
+        analysis = AnalysisResult(language="en", requirements=["Python"])
+        tailor_result = _sample_result()
+
+        with patch("jobtracker.tailor.make_client",
+                  lambda: _fake_client(analysis, tailor_result)):
+            fake_record_store.calls = []
+            webapp.GENERATION.pop("test:1", None)  # clear leftover "running" state
+            r = client.post("/jobs/test:1/generate", follow_redirects=False)
+            assert r.status_code == 303
+            assert webapp.GENERATION["test:1"]["state"] == "draft"
+            assert {c["stage"] for c in fake_record_store.calls} == {"analyse", "tailor"}
+            print("PASS a real generate() run records both API calls via _record_store()")
+            webapp.DRAFTS.pop("test:1", None)
+
+            # webapp._record_store is globally replaced with the fake above
+            # (so no OTHER test writes real files) -- this specific test
+            # needs the REAL _record_store() back, so its own try/except
+            # (the fix under test) actually runs, with
+            # generation_records.make_generation_record_store (what it
+            # calls internally) raising to simulate an unreachable DB.
+            with patch.object(webapp, "_record_store", real_record_store_fn), \
+                patch("jobtracker.webapp.generation_records.make_generation_record_store",
+                     side_effect=RuntimeError("DB down")):
+                webapp.GENERATION.pop("test:1", None)
+                r = client.post("/jobs/test:1/generate", follow_redirects=False)
+                assert r.status_code == 303
+                assert webapp.GENERATION["test:1"]["state"] == "draft"  # NOT "error"
+                print("PASS a dead generation_records backend does not break generation")
+                webapp.DRAFTS.pop("test:1", None)
+
+        with patch.object(webapp, "_record_store", real_record_store_fn), \
+            patch("jobtracker.webapp.generation_records.make_generation_record_store",
+                 side_effect=RuntimeError("DB down")):
+            r = client.get("/costs")
+            assert r.status_code == 200
+            assert "niet bereiken" in r.text  # degrades to a message, not a 500
+            print("PASS a dead generation_records backend degrades /costs instead of 500ing")
 
     print("\nAll webapp tests passed.")
 

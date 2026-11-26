@@ -25,6 +25,7 @@ monkeypatching the SDK.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import List, Optional, Tuple
 
@@ -248,7 +249,6 @@ def _record(record_store, job_id: Optional[str], stage: str, model: str, respons
         data = generation_records.record_from_response(job_id, stage, model, response)
         record_store.record(**data)
     except Exception:  # noqa: BLE001
-        import logging
         logging.getLogger(__name__).exception(
             "generation_records write failed for job %s (%s)", job_id, stage)
 

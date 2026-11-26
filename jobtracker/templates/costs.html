@@ -8,7 +8,10 @@
     handmatig bijgehouden in <code>jobtracker/generation_records.py</code> en
     kunnen afwijken als Anthropic de tarieven wijzigt.</p>
 
-  {% if not months %}
+  {% if store_unavailable %}
+  <p class="err">Kon de generation-records opslag niet bereiken (database niet
+    beschikbaar?) — geen kostenoverzicht beschikbaar nu.</p>
+  {% elif not months %}
   <p class="muted">Nog geen generaties geregistreerd.</p>
   {% else %}
   <p><b>Totaal:</b> ${{ "%.2f"|format(total_cost) }} over {{ total_calls }} aanroepen.</p>
@@ -30,7 +33,7 @@
     <tr>
       <td colspan="7" class="muted" data-label="Per model">
         {% for model, stats in m.by_model.items() %}
-          {{ model }}: {{ stats.calls }}x (${{ "%.2f"|format(stats.cost_usd) }}){% if not loop.last %}, {% endif %}
+          {{ model }}: {{ stats.calls }}x ({% if stats.unpriced %}—{% else %}${{ "%.2f"|format(stats.cost_usd) }}{% endif %}){% if not loop.last %}, {% endif %}
         {% endfor %}
       </td>
     </tr>

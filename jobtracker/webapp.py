@@ -22,6 +22,7 @@ Features
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from pathlib import Path
@@ -71,8 +72,26 @@ def _record_store():
     (issue #13) -- same reasoning as `_store()`/`OUTPUT_DIR`: tests patch
     this attribute (`patch.object(webapp, "_record_store", ...)`) instead of
     a real call constructing a LocalJSONGenerationRecordStore that writes
-    into the real data/generation_records.json during a test run."""
-    return generation_records.make_generation_record_store()
+    into the real data/generation_records.json during a test run.
+
+    Construction failure (e.g. DATABASE_URL set but Postgres unreachable --
+    PostgresGenerationRecordStore.__init__ calls ensure_schema(), which opens
+    a connection) is caught here, not left for the caller: this expression
+    is evaluated as a plain call ARGUMENT at each of this function's call
+    sites (`generation.generate_or_handoff(..., record_store=_record_store())`
+    etc.), outside of any try/except those callers have around the actual
+    generation -- an unreachable DB would otherwise fail the whole request
+    before generation even starts, defeating the "a record-store failure
+    must not break a working generation" design and turning a dead DB into
+    a 500 on /jobs/{id}/generate, /review/regenerate, and /costs alike.
+    Returns None on failure; callers treat that the same as "no record_store
+    given" (don't record)."""
+    try:
+        return generation_records.make_generation_record_store()
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception(
+            "generation_records store unavailable; not recording this request")
+        return None
 
 
 # --- scraping ---------------------------------------------------------------- #
@@ -549,12 +568,15 @@ def save_settings(keywords: str = Form(""), excludes: str = Form(""),
 # --- generation cost overview (issue #13) ---------------------------------------- #
 @app.get("/costs", response_class=HTMLResponse)
 def costs(request: Request):
-    records = _record_store().list_all()
+    store = _record_store()
+    store_unavailable = store is None
+    records = store.list_all() if store is not None else []
     months = generation_records.monthly_cost_summary(records)
     return templates.TemplateResponse(request, "costs.html", {
         "months": months,
         "total_cost": sum(m["cost_usd"] for m in months),
         "total_calls": sum(m["calls"] for m in months),
+        "store_unavailable": store_unavailable,
     })
 
 
