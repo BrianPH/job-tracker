@@ -327,16 +327,28 @@ original posting is taken offline. Jobs generated this way are **not** added
 to the main vacancy board; they only exist for the duration of the
 generation request and its downloadable `.docx` files.
 
-**Security note.** `/ingest` fetches whatever URL the form is given,
-server-side, with no restriction on scheme or target host. On a trusted
-single-user network this is the same risk class as any other personal tool
-that fetches a URL you paste in yourself. If you run with `python run_web.py
---lan` on a network you don't fully trust, be aware that a malicious or
-compromised client on that network could submit a URL pointing at an
-internal host (for example the Postgres container) rather than a real
-vacancy page. See issue #19 for tracked hardening work (restrict to
-`http`/`https`, reject private/loopback-resolving hosts, cap response
-size).
+**SSRF hardening.** SSRF (server-side request forgery) is an attack where a
+server is tricked into fetching a URL on the attacker's behalf, reaching
+hosts the attacker could not otherwise reach directly — for example an
+internal service with no public exposure. `/ingest`'s generic page fetch
+(`fetch_generic` in `jobtracker/ingest.py`) is the only one of the three
+paths above whose target host comes from user input — the known-platform
+path always calls a hardcoded vendor API host. That generic fetch is
+restricted to `http`/`https`, resolves the host and rejects it if any
+resolved address is private/loopback/link-local/multicast/reserved/
+unspecified (covering, among others, the common internal-host and
+cloud-metadata-endpoint targets), caps the response body read from the
+socket, and re-validates the target host on every redirect hop — not just
+the original URL, since a redirect can repoint at an internal host even
+when the original URL was a legitimate external one. The Playwright
+fallback validates its initial URL the same way, but does not re-validate
+redirects the browser follows internally. This hardening does not extend
+to the known-platform detail fetchers or the `companies.yaml`-driven
+scrapers in `adapters.py`, since their target host is never
+attacker-controlled. Even so, if you run with `python run_web.py --lan`
+(no authentication), only do so on a network you trust — this hardening
+narrows the SSRF attack surface, it does not replace authentication on
+that network.
 
 ---
 
