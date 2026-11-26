@@ -332,23 +332,32 @@ server is tricked into fetching a URL on the attacker's behalf, reaching
 hosts the attacker could not otherwise reach directly — for example an
 internal service with no public exposure. `/ingest`'s generic page fetch
 (`fetch_generic` in `jobtracker/ingest.py`) is the only one of the three
-paths above whose target host comes from user input — the known-platform
-path always calls a hardcoded vendor API host. That generic fetch is
-restricted to `http`/`https`, resolves the host and rejects it if any
-resolved address is private/loopback/link-local/multicast/reserved/
-unspecified (covering, among others, the common internal-host and
-cloud-metadata-endpoint targets), caps the response body read from the
-socket, and re-validates the target host on every redirect hop — not just
-the original URL, since a redirect can repoint at an internal host even
-when the original URL was a legitimate external one. The Playwright
-fallback validates its initial URL the same way, but does not re-validate
-redirects the browser follows internally. This hardening does not extend
-to the known-platform detail fetchers or the `companies.yaml`-driven
-scrapers in `adapters.py`, since their target host is never
-attacker-controlled. Even so, if you run with `python run_web.py --lan`
-(no authentication), only do so on a network you trust — this hardening
-narrows the SSRF attack surface, it does not replace authentication on
-that network.
+paths above whose target host comes directly from user input — the
+known-platform path's request host either is a hardcoded vendor API host,
+or has that vendor's domain as a fixed, hardcoded SUFFIX with only the
+tenant subdomain label taken from the user's URL (Teamtailor, Workday,
+Recruitee); an attacker cannot make that fixed suffix resolve to an
+internal address. The generic fetch itself is restricted to `http`/
+`https`, resolves the host and rejects it if any resolved address is
+private/loopback/link-local/multicast/reserved/unspecified, or carrier-grade
+NAT (the 100.64.0.0/10 range also used by Tailscale-style overlay
+networks) — covering, among others, the common internal-host and
+cloud-metadata-endpoint targets. It also caps the response body read from
+the socket, and re-validates the target host on
+every redirect hop — not just the original URL, since a redirect can
+repoint at an internal host even when the original URL was a legitimate
+external one. The Playwright fallback validates its initial URL the same
+way, but does not re-validate redirects the browser follows internally.
+This hardening does not extend to the known-platform detail fetchers or
+the `companies.yaml`-driven scrapers in `adapters.py`, since their target
+host is never fully attacker-controlled. One residual gap applies even to
+the generic fetch: the host is resolved once to decide whether to proceed
+and resolved again, independently, by the actual HTTP request, so a
+hostname whose DNS answer changes between those two lookups (DNS
+rebinding) can still slip through — this hardening narrows the SSRF
+attack surface, it does not close it completely. Even so, if you run with
+`python run_web.py --lan` (no authentication), only do so on a network you
+trust — this hardening is not a substitute for that.
 
 ---
 
