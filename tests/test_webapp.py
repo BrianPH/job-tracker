@@ -35,10 +35,29 @@ def main():
     os.environ["JOBTRACKER_SKIP_ENV"] = "1"
 
     from fastapi.testclient import TestClient
-    from jobtracker import webapp
+    from jobtracker import generator, webapp
     from jobtracker.storage import LocalJSONStore
 
     webapp._store = lambda: LocalJSONStore(str(store_path))  # patch store factory
+
+    # generator.load_candidate() falls back to config/candidate.example.yaml
+    # ONLY when config/candidate.yaml doesn't exist on disk -- true in a
+    # fresh checkout, but FALSE on a host that has ever run this app for
+    # real (a real candidate.yaml exists there, git-ignored, and docker
+    # compose run/up both bind-mount config/ unconditionally). Several
+    # tests below exercise the real (unmocked) generate/upload routes end
+    # to end with hardcoded ids that only exist in the EXAMPLE candidate
+    # ("examplecorp", "examplecorp-pipelines") -- against a real
+    # candidate.yaml those ids don't exist, validate_tailor_result rejects
+    # them, and the route silently takes its "invalid" branch instead of
+    # "draft", which also means the handoff-status-restore code is never
+    # reached. That's exactly the bug that broke CI/deploys on the real
+    # host while passing in every clean sandbox: load_candidate() must be
+    # pinned to the example file here, not left to depend on whether a
+    # real candidate.yaml happens to exist on whatever machine runs this.
+    _example_candidate = generator.load_candidate(
+        generator.ROOT / "config" / "candidate.example.yaml")
+    generator.load_candidate = lambda path=None: _example_candidate
 
     class _FakeRecordStore:
         """issue #13: generate/regenerate now pass a record_store through
