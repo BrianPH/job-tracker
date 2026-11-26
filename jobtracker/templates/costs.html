@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="card">
+  <h2>Kosten per maand</h2>
+  <p class="muted">Geschat op basis van opgeslagen token-gebruik per Claude-aanroep
+    (analyse + tailor), inclusief prompt-cache schrijven/lezen. Prijzen zijn
+    handmatig bijgehouden in <code>jobtracker/generation_records.py</code> en
+    kunnen afwijken als Anthropic de tarieven wijzigt.</p>
+
+  {% if store_unavailable %}
+  <p class="err">Kon de generation-records opslag niet bereiken (database niet
+    beschikbaar?) — geen kostenoverzicht beschikbaar nu.</p>
+  {% elif not months %}
+  <p class="muted">Nog geen generaties geregistreerd.</p>
+  {% else %}
+  <p><b>Totaal:</b> ${{ "%.2f"|format(total_cost) }} over {{ total_calls }} aanroepen.</p>
+  <table>
+    <tr class="head">
+      <th>Maand</th><th>Aanroepen</th><th>Input tokens</th><th>Output tokens</th>
+      <th>Cache write</th><th>Cache read</th><th>Kosten (USD)</th>
+    </tr>
+    {% for m in months %}
+    <tr>
+      <td data-label="Maand">{{ m.month }}</td>
+      <td data-label="Aanroepen">{{ m.calls }}{% if m.unpriced_calls %} <span class="muted">({{ m.unpriced_calls }} zonder prijs)</span>{% endif %}</td>
+      <td data-label="Input tokens">{{ m.input_tokens }}</td>
+      <td data-label="Output tokens">{{ m.output_tokens }}</td>
+      <td data-label="Cache write">{{ m.cache_creation_tokens }}</td>
+      <td data-label="Cache read">{{ m.cache_read_tokens }}</td>
+      <td data-label="Kosten (USD)">${{ "%.2f"|format(m.cost_usd) }}</td>
+    </tr>
+    <tr>
+      <td colspan="7" class="muted" data-label="Per model">
+        {% for model, stats in m.by_model.items() %}
+          {{ model }}: {{ stats.calls }}x ({% if stats.unpriced %}—{% else %}${{ "%.2f"|format(stats.cost_usd) }}{% endif %}){% if not loop.last %}, {% endif %}
+        {% endfor %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+
+{% endblock %}

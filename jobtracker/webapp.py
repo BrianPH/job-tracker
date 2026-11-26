@@ -22,6 +22,7 @@ Features
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from pathlib import Path
@@ -34,6 +35,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from . import generation
+from . import generation_records
 from . import generator
 from . import tailor
 from .generation_schema import ground_tailor_result
@@ -63,6 +65,33 @@ _LOCK = threading.Lock()
 def _store():
     load_env()
     return make_store()[0]
+
+
+def _record_store():
+    """Indirection around generation_records.make_generation_record_store()
+    (issue #13) -- same reasoning as `_store()`/`OUTPUT_DIR`: tests patch
+    this attribute (`patch.object(webapp, "_record_store", ...)`) instead of
+    a real call constructing a LocalJSONGenerationRecordStore that writes
+    into the real data/generation_records.json during a test run.
+
+    Construction failure (e.g. DATABASE_URL set but Postgres unreachable --
+    PostgresGenerationRecordStore.__init__ calls ensure_schema(), which opens
+    a connection) is caught here, not left for the caller: this expression
+    is evaluated as a plain call ARGUMENT at each of this function's call
+    sites (`generation.generate_or_handoff(..., record_store=_record_store())`
+    etc.), outside of any try/except those callers have around the actual
+    generation -- an unreachable DB would otherwise fail the whole request
+    before generation even starts, defeating the "a record-store failure
+    must not break a working generation" design and turning a dead DB into
+    a 500 on /jobs/{id}/generate, /review/regenerate, and /costs alike.
+    Returns None on failure; callers treat that the same as "no record_store
+    given" (don't record)."""
+    try:
+        return generation_records.make_generation_record_store()
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception(
+            "generation_records store unavailable; not recording this request")
+        return None
 
 
 # --- scraping ---------------------------------------------------------------- #
@@ -211,8 +240,9 @@ def _redirect_target(job_id: str) -> str:
 
 def _generate_worker(job_id: str, job: dict):
     try:
-        result = generation.generate_or_handoff(job, out_dir=OUTPUT_DIR,
-                                                set_status=_set_status_fn(job_id))
+        result = generation.generate_or_handoff(
+            job, out_dir=OUTPUT_DIR, set_status=_set_status_fn(job_id),
+            record_store=_record_store())
     except Exception as e:  # noqa: BLE001
         GENERATION[job_id] = {"state": "error", "error": str(e), "files": []}
         return
@@ -372,9 +402,10 @@ def review_regenerate(job_id: str):
             return RedirectResponse(f"/jobs/{job_id}/review", status_code=303)
         _REGENERATING.add(job_id)
     try:
-        result = generation.regenerate(job, draft["analysis"], draft["candidate"],
-                                       draft.get("style_example", ""), out_dir=OUTPUT_DIR,
-                                       set_status=_set_status_fn(job_id))
+        result = generation.regenerate(
+            job, draft["analysis"], draft["candidate"], draft.get("style_example", ""),
+            out_dir=OUTPUT_DIR, set_status=_set_status_fn(job_id),
+            record_store=_record_store())
     finally:
         with _LOCK:
             _REGENERATING.discard(job_id)
@@ -532,6 +563,21 @@ def save_settings(keywords: str = Form(""), excludes: str = Form(""),
         encoding="utf-8")
     _reschedule()
     return RedirectResponse("/settings?saved=1", status_code=303)
+
+
+# --- generation cost overview (issue #13) ---------------------------------------- #
+@app.get("/costs", response_class=HTMLResponse)
+def costs(request: Request):
+    store = _record_store()
+    store_unavailable = store is None
+    records = store.list_all() if store is not None else []
+    months = generation_records.monthly_cost_summary(records)
+    return templates.TemplateResponse(request, "costs.html", {
+        "months": months,
+        "total_cost": sum(m["cost_usd"] for m in months),
+        "total_calls": sum(m["calls"] for m in months),
+        "store_unavailable": store_unavailable,
+    })
 
 
 # --- daily scheduler ------------------------------------------------------------ #
