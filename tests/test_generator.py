@@ -48,16 +48,8 @@ def test_detect_language():
 
 
 def test_candidate_config_loads():
-    # Explicit EXAMPLE_PATH, not the bare load_candidate() fallback -- on a
-    # host that has ever run this app for real, a real (git-ignored)
-    # config/candidate.yaml exists and docker compose bind-mounts config/
-    # unconditionally, so the fallback-to-example path never triggers there
-    # even though it does in a clean checkout. This module's own docstring
-    # already states the intent ("uses candidate.example.yaml throughout");
-    # every other call site in this file already does this explicitly --
-    # this one was the sole holdout, and it broke CI the moment a prior,
-    # unrelated CI failure (tests/test_webapp.py, issue fixed in #28)
-    # stopped masking it.
+    # Pin to the example file -- the bare fallback resolves to the real,
+    # git-ignored candidate.yaml on a host that has actually run this app.
     c = load_candidate(EXAMPLE_PATH)
     assert c["personal"]["name"]
     assert c["experience"] and c["education"] and c["skills"]
