@@ -1,15 +1,19 @@
 """Offline tests for jobtracker/ingest.py (no real network: requests.get is
 monkeypatched with an in-memory fake, matching the pattern in
 tests/test_smartrecruiters.py)."""
+import ipaddress
+import socket
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import requests
 
+from jobtracker import ingest
 from jobtracker.ingest import (
     IngestInputError,
     ThinContentError,
+    UnsafeURLError,
     _clean_title,
     _company_from_domain,
     _strip_company_boilerplate,
@@ -19,6 +23,19 @@ from jobtracker.ingest import (
 from jobtracker.snapshots import LocalJSONSnapshotStore, snapshot_id
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+# issue #19: every test in this file that doesn't specifically test the SSRF
+# validation itself needs host resolution to NOT depend on real DNS (these
+# tests use made-up domains like spa-example.com that would either fail to
+# resolve in a network-restricted sandbox or be flaky if one happened to be
+# registered for real) -- permanently replacing _resolve_host with a safe
+# public IP is the same pattern tests/test_webapp.py uses for webapp._store.
+# Tests that exercise the SSRF checks themselves override this locally via
+# `with patch.object(ingest, "_resolve_host", ...)`. Saved BEFORE the stub
+# replaces it, so the one test that needs the REAL resolver (a literal IP
+# in the URL, no DNS involved) can restore it.
+_REAL_RESOLVE_HOST = ingest._resolve_host
+ingest._resolve_host = lambda hostname: [ipaddress.ip_address("8.8.8.8")]
 
 
 class FakeSnapshotStore:
@@ -41,7 +58,14 @@ class FakeSnapshotStore:
 
 def _fake_get(responses, calls=None):
     """responses: dict EXACT url -> (json_body or None, text_body, status_or_none).
-    `calls`, if given, collects every requested URL so tests can assert on it."""
+    `calls`, if given, collects every requested URL so tests can assert on it.
+
+    issue #19: safe_fetch (used by fetch_generic) reads the body via
+    resp.iter_content()/resp.encoding (stream=True) instead of the old bare
+    resp.text, and checks resp.is_redirect before that -- every entry here
+    gets those wired up too, in addition to the pre-existing
+    json/text/raise_for_status, so this ONE helper change covers all ~15
+    existing callers rather than touching each test."""
     def fake_get(url, headers=None, timeout=None, **kwargs):
         if calls is not None:
             calls.append(url)
@@ -56,6 +80,12 @@ def _fake_get(responses, calls=None):
             resp.raise_for_status = lambda: None
         resp.json = (lambda jb=json_body: jb) if json_body is not None else (lambda: {})
         resp.text = text_body
+        resp.is_redirect = False
+        resp.encoding = "utf-8"
+        body_bytes = (text_body or "").encode("utf-8")
+        resp.iter_content = lambda chunk_size=65536, _b=body_bytes: iter(
+            [_b[i:i + chunk_size] for i in range(0, len(_b), chunk_size)] or [b""])
+        resp.close = MagicMock()
         return resp
     return fake_get
 
@@ -457,6 +487,195 @@ def test_strip_company_boilerplate():
 
 
 # --------------------------------------------------------------------------- #
+# issue #19: SSRF hardening -- scheme/host validation, redirect              #
+# re-validation, response-size cap.                                          #
+# --------------------------------------------------------------------------- #
+def test_validate_fetch_url_rejects_disallowed_schemes():
+    for bad_url in ("ftp://example.com/x", "file:///etc/passwd", "javascript:alert(1)"):
+        try:
+            ingest._validate_fetch_url(bad_url)
+        except UnsafeURLError:
+            pass
+        else:
+            raise AssertionError(f"expected UnsafeURLError for {bad_url}")
+    print("PASS test_validate_fetch_url_rejects_disallowed_schemes")
+
+
+def test_validate_fetch_url_rejects_private_loopback_and_link_local_hosts():
+    # Covers RFC1918 private (10.x), loopback (both families), and the
+    # cloud-metadata-endpoint link-local address specifically called out
+    # in the issue.
+    for ip_str in ("127.0.0.1", "10.0.0.1", "192.168.1.5", "169.254.169.254", "::1"):
+        with patch.object(ingest, "_resolve_host",
+                          lambda h, _ip=ip_str: [ipaddress.ip_address(_ip)]):
+            try:
+                ingest._validate_fetch_url("http://malicious-host.example/x")
+            except UnsafeURLError:
+                pass
+            else:
+                raise AssertionError(f"expected UnsafeURLError for resolved ip {ip_str}")
+    print("PASS test_validate_fetch_url_rejects_private_loopback_and_link_local_hosts")
+
+
+def test_validate_fetch_url_rejects_unresolvable_host():
+    def _raise(hostname):
+        raise socket.gaierror("nodename nor servname provided")
+    with patch.object(ingest, "_resolve_host", _raise):
+        try:
+            ingest._validate_fetch_url("http://does-not-exist.invalid/x")
+        except UnsafeURLError:
+            pass
+        else:
+            raise AssertionError("expected UnsafeURLError")
+    print("PASS test_validate_fetch_url_rejects_unresolvable_host")
+
+
+def test_validate_fetch_url_rejects_literal_private_ip_without_mocked_dns():
+    # A literal IP in the URL doesn't need a DNS round-trip -- getaddrinfo
+    # resolves a numeric host immediately. This restores the REAL
+    # _resolve_host (not this file's module-level safe-IP stub) to confirm
+    # the literal-IP path is genuinely checked end-to-end, not just
+    # accepted because the stub ignores its hostname argument.
+    with patch.object(ingest, "_resolve_host", _REAL_RESOLVE_HOST):
+        try:
+            ingest._validate_fetch_url("http://192.168.1.1/careers")
+        except UnsafeURLError:
+            pass
+        else:
+            raise AssertionError("expected UnsafeURLError for a literal private IP")
+    print("PASS test_validate_fetch_url_rejects_literal_private_ip_without_mocked_dns")
+
+
+def test_validate_fetch_url_rejects_cgnat_addresses():
+    # 100.64.0.0/10 (CGNAT/Tailscale) is NOT flagged "private" by Python's
+    # ipaddress module, but it's a plausible internal-service range on the
+    # kind of home/small-office server this tool runs on -- the explicit
+    # _EXTRA_DENIED_NETWORKS list closes that gap.
+    with patch.object(ingest, "_resolve_host",
+                      lambda h: [ipaddress.ip_address("100.64.0.1")]):
+        try:
+            ingest._validate_fetch_url("http://tailscale-host.example/x")
+        except UnsafeURLError:
+            pass
+        else:
+            raise AssertionError("expected UnsafeURLError for a CGNAT address")
+    print("PASS test_validate_fetch_url_rejects_cgnat_addresses")
+
+
+def test_safe_fetch_closes_the_connection_on_a_failing_status():
+    # stream=True means the connection stays open until closed; a 4xx/5xx
+    # that raise_for_status() turns into an exception must still close it,
+    # or every failing generic fetch leaks a pooled connection.
+    def fake_get(url, headers=None, timeout=None, **kwargs):
+        resp = MagicMock()
+        resp.is_redirect = False
+        resp.raise_for_status = MagicMock(side_effect=requests.HTTPError("404 error"))
+        resp.close = MagicMock()
+        fake_get.last_resp = resp
+        return resp
+
+    with patch("jobtracker.ingest.requests.get", fake_get):
+        try:
+            ingest.safe_fetch("https://external.example/missing")
+        except requests.HTTPError:
+            pass
+        else:
+            raise AssertionError("expected requests.HTTPError to propagate")
+    fake_get.last_resp.close.assert_called_once()
+    print("PASS test_safe_fetch_closes_the_connection_on_a_failing_status")
+
+
+def test_safe_fetch_revalidates_each_redirect_hop():
+    # The core "re-validate after redirects" requirement: the ORIGINAL url
+    # resolves safely, but the Location it redirects to resolves to a
+    # private address -- requests' own allow_redirects=True would follow
+    # it without re-checking, since only the original URL was ever
+    # validated under the old (pre-#19) code.
+    calls = []
+
+    def fake_get(url, headers=None, timeout=None, **kwargs):
+        calls.append(url)
+        if url == "https://external.example/start":
+            resp = MagicMock()
+            resp.is_redirect = True
+            resp.headers = {"Location": "https://internal.example/secret"}
+            resp.close = MagicMock()
+            return resp
+        raise AssertionError(f"should never actually fetch the internal target: {url}")
+
+    def fake_resolve(hostname):
+        if hostname == "internal.example":
+            return [ipaddress.ip_address("10.0.0.5")]
+        return [ipaddress.ip_address("8.8.8.8")]
+
+    with patch("jobtracker.ingest.requests.get", fake_get), \
+        patch.object(ingest, "_resolve_host", fake_resolve):
+        try:
+            ingest.safe_fetch("https://external.example/start")
+        except UnsafeURLError:
+            pass
+        else:
+            raise AssertionError("expected UnsafeURLError")
+    assert calls == ["https://external.example/start"]  # the internal hop was never requested
+    print("PASS test_safe_fetch_revalidates_each_redirect_hop")
+
+
+def test_safe_fetch_rejects_response_exceeding_max_bytes():
+    big_chunk = b"x" * 1000
+
+    def fake_get(url, headers=None, timeout=None, **kwargs):
+        resp = MagicMock()
+        resp.is_redirect = False
+        resp.raise_for_status = lambda: None
+        resp.encoding = "utf-8"
+        resp.iter_content = lambda chunk_size=65536: iter([big_chunk] * 10)  # 10,000 bytes
+        resp.close = MagicMock()
+        return resp
+
+    with patch("jobtracker.ingest.requests.get", fake_get):
+        try:
+            ingest.safe_fetch("https://external.example/big", max_bytes=5000)
+        except UnsafeURLError:
+            pass
+        else:
+            raise AssertionError("expected UnsafeURLError for an oversized response")
+    print("PASS test_safe_fetch_rejects_response_exceeding_max_bytes")
+
+
+def test_safe_fetch_rejects_too_many_redirects():
+    def fake_get(url, headers=None, timeout=None, **kwargs):
+        resp = MagicMock()
+        resp.is_redirect = True
+        resp.headers = {"Location": url + "/next"}  # redirects forever, never terminates
+        resp.close = MagicMock()
+        return resp
+
+    with patch("jobtracker.ingest.requests.get", fake_get):
+        try:
+            ingest.safe_fetch("https://external.example/start", max_redirects=3)
+        except UnsafeURLError:
+            pass
+        else:
+            raise AssertionError("expected UnsafeURLError for too many redirects")
+    print("PASS test_safe_fetch_rejects_too_many_redirects")
+
+
+def test_ingest_url_propagates_unsafe_url_error_for_a_bad_scheme():
+    # End-to-end: ingest_url's generic fallback must actually surface the
+    # rejection (webapp.py's existing generic except-Exception handler
+    # degrades this safely already -- confirmed by reading that code, no
+    # change needed there).
+    store = FakeSnapshotStore()
+    try:
+        ingest_url("ftp://example.com/careers/1", snapshot_store=store)
+    except UnsafeURLError:
+        pass
+    else:
+        raise AssertionError("expected UnsafeURLError")
+    print("PASS test_ingest_url_propagates_unsafe_url_error_for_a_bad_scheme")
+
+
+# --------------------------------------------------------------------------- #
 # snapshot_id: host is normalized, but path case is kept significant          #
 # --------------------------------------------------------------------------- #
 def test_snapshot_id_normalizes_host_case_only():
@@ -514,6 +733,16 @@ if __name__ == "__main__":
     test_clean_title_strips_boilerplate_or_company_tail()
     test_clean_title_strips_pipe_tail_unconditionally()
     test_strip_company_boilerplate()
+    test_validate_fetch_url_rejects_disallowed_schemes()
+    test_validate_fetch_url_rejects_private_loopback_and_link_local_hosts()
+    test_validate_fetch_url_rejects_unresolvable_host()
+    test_validate_fetch_url_rejects_literal_private_ip_without_mocked_dns()
+    test_validate_fetch_url_rejects_cgnat_addresses()
+    test_safe_fetch_closes_the_connection_on_a_failing_status()
+    test_safe_fetch_revalidates_each_redirect_hop()
+    test_safe_fetch_rejects_response_exceeding_max_bytes()
+    test_safe_fetch_rejects_too_many_redirects()
+    test_ingest_url_propagates_unsafe_url_error_for_a_bad_scheme()
     test_snapshot_id_normalizes_host_case_only()
     test_snapshot_survives_posting_removed()
     print("\nAll ingest tests passed.")
