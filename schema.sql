@@ -61,4 +61,10 @@ CREATE TABLE IF NOT EXISTS generation_records (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- issue #13: prompt-cache token usage, so a cached tailor call's true cost
+-- (cache write/read tokens are priced differently from plain input tokens)
+-- is computable from this table, not just its non-cached input_tokens.
+ALTER TABLE generation_records ADD COLUMN IF NOT EXISTS cache_creation_input_tokens INTEGER;
+ALTER TABLE generation_records ADD COLUMN IF NOT EXISTS cache_read_input_tokens     INTEGER;
+
 CREATE INDEX IF NOT EXISTS generation_records_job_idx ON generation_records (job_id);
