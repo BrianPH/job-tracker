@@ -39,6 +39,24 @@ def main():
     from jobtracker.storage import LocalJSONStore
 
     webapp._store = lambda: LocalJSONStore(str(store_path))  # patch store factory
+
+    class _FakeRecordStore:
+        """issue #13: generate/regenerate now pass a record_store through
+        webapp._record_store() -- patched here (same reasoning as _store()
+        above) so no test writes into the real data/generation_records.json
+        on disk. .calls lets individual tests assert what got recorded."""
+        def __init__(self):
+            self.calls = []
+
+        def record(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"record_id": "fake-id"}
+
+        def list_all(self):
+            return []
+
+    fake_record_store = _FakeRecordStore()
+    webapp._record_store = lambda: fake_record_store
     client = TestClient(webapp.app)
 
     r = client.get("/")
@@ -421,6 +439,22 @@ def main():
         assert r.status_code == 303
         assert "test:1" not in webapp.DRAFTS
         print("PASS a new generate() call clears any stale draft immediately")
+
+        # --- /costs (issue #13) --------------------------------------------- #
+        r = client.get("/costs")
+        assert r.status_code == 200
+        assert "Nog geen generaties geregistreerd" in r.text  # fake store starts empty
+        print("PASS /costs renders with no generation records yet")
+
+        fake_record_store.list_all = lambda: [
+            {"job_id": "test:1", "stage": "tailor", "model": "claude-sonnet-5",
+             "input_tokens": 1000, "output_tokens": 500,
+             "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+             "created_at": "2026-11-20T09:00:00+00:00"},
+        ]
+        r = client.get("/costs")
+        assert r.status_code == 200 and "2026-11" in r.text
+        print("PASS /costs renders a monthly summary from recorded rows")
 
     print("\nAll webapp tests passed.")
 

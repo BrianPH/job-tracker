@@ -34,6 +34,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from . import generation
+from . import generation_records
 from . import generator
 from . import tailor
 from .generation_schema import ground_tailor_result
@@ -63,6 +64,15 @@ _LOCK = threading.Lock()
 def _store():
     load_env()
     return make_store()[0]
+
+
+def _record_store():
+    """Indirection around generation_records.make_generation_record_store()
+    (issue #13) -- same reasoning as `_store()`/`OUTPUT_DIR`: tests patch
+    this attribute (`patch.object(webapp, "_record_store", ...)`) instead of
+    a real call constructing a LocalJSONGenerationRecordStore that writes
+    into the real data/generation_records.json during a test run."""
+    return generation_records.make_generation_record_store()
 
 
 # --- scraping ---------------------------------------------------------------- #
@@ -211,8 +221,9 @@ def _redirect_target(job_id: str) -> str:
 
 def _generate_worker(job_id: str, job: dict):
     try:
-        result = generation.generate_or_handoff(job, out_dir=OUTPUT_DIR,
-                                                set_status=_set_status_fn(job_id))
+        result = generation.generate_or_handoff(
+            job, out_dir=OUTPUT_DIR, set_status=_set_status_fn(job_id),
+            record_store=_record_store())
     except Exception as e:  # noqa: BLE001
         GENERATION[job_id] = {"state": "error", "error": str(e), "files": []}
         return
@@ -372,9 +383,10 @@ def review_regenerate(job_id: str):
             return RedirectResponse(f"/jobs/{job_id}/review", status_code=303)
         _REGENERATING.add(job_id)
     try:
-        result = generation.regenerate(job, draft["analysis"], draft["candidate"],
-                                       draft.get("style_example", ""), out_dir=OUTPUT_DIR,
-                                       set_status=_set_status_fn(job_id))
+        result = generation.regenerate(
+            job, draft["analysis"], draft["candidate"], draft.get("style_example", ""),
+            out_dir=OUTPUT_DIR, set_status=_set_status_fn(job_id),
+            record_store=_record_store())
     finally:
         with _LOCK:
             _REGENERATING.discard(job_id)
@@ -532,6 +544,18 @@ def save_settings(keywords: str = Form(""), excludes: str = Form(""),
         encoding="utf-8")
     _reschedule()
     return RedirectResponse("/settings?saved=1", status_code=303)
+
+
+# --- generation cost overview (issue #13) ---------------------------------------- #
+@app.get("/costs", response_class=HTMLResponse)
+def costs(request: Request):
+    records = _record_store().list_all()
+    months = generation_records.monthly_cost_summary(records)
+    return templates.TemplateResponse(request, "costs.html", {
+        "months": months,
+        "total_cost": sum(m["cost_usd"] for m in months),
+        "total_calls": sum(m["calls"] for m in months),
+    })
 
 
 # --- daily scheduler ------------------------------------------------------------ #
