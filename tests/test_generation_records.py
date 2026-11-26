@@ -196,6 +196,73 @@ def test_monthly_cost_summary_handles_datetime_created_at():
     print("PASS test_monthly_cost_summary_handles_datetime_created_at")
 
 
+def test_monthly_cost_summary_converts_non_utc_datetime_to_utc_month():
+    # psycopg2 decodes TIMESTAMPTZ into the CONNECTION's session timezone,
+    # not necessarily UTC -- a naive strftime("%Y-%m") on that value groups
+    # by the WRONG month whenever the session timezone and the moment both
+    # sit near a month boundary. This instant is 2026-11-30T23:30 UTC, but
+    # 2026-12-01T00:30 in UTC+1 -- the two backends must still agree it's
+    # November.
+    tz_plus_one = datetime.timezone(datetime.timedelta(hours=1))
+    records = [
+        {"model": "claude-sonnet-5", "input_tokens": 100, "output_tokens": 50,
+         "created_at": datetime.datetime(2026, 12, 1, 0, 30, tzinfo=tz_plus_one)},
+    ]
+    months = monthly_cost_summary(records)
+    assert months[0]["month"] == "2026-11"
+    print("PASS test_monthly_cost_summary_converts_non_utc_datetime_to_utc_month")
+
+
+def test_monthly_cost_summary_marks_unpriced_models_in_by_model():
+    # A model missing from MODEL_PRICING must render distinguishably from
+    # an actually-free model in the per-model breakdown too, not just at
+    # the month-level unpriced_calls count.
+    records = [
+        {"model": "claude-sonnet-5", "input_tokens": 100, "output_tokens": 50,
+         "created_at": "2026-11-01T09:00:00+00:00"},
+        {"model": "some-future-model", "input_tokens": 100, "output_tokens": 50,
+         "created_at": "2026-11-01T09:00:00+00:00"},
+    ]
+    months = monthly_cost_summary(records)
+    by_model = months[0]["by_model"]
+    assert by_model["claude-sonnet-5"]["unpriced"] is False
+    assert by_model["some-future-model"]["unpriced"] is True
+    assert by_model["some-future-model"]["cost_usd"] == 0.0
+    print("PASS test_monthly_cost_summary_marks_unpriced_models_in_by_model")
+
+
+def test_local_json_store_record_is_thread_safe_under_concurrent_writes():
+    # webapp.py constructs a FRESH store instance per request -- a race
+    # between two concurrent generations (two background-thread workers)
+    # writing through DIFFERENT instances pointed at the SAME file must not
+    # drop a row (non-atomic read-modify-write) or ever leave the file
+    # truncated/corrupt for a /costs request reading it mid-write.
+    import threading as _threading
+
+    tmp = Path(tempfile.mkdtemp(prefix="jt_genrec_"))
+    try:
+        path = str(tmp / "generation_records.json")
+        n_threads, n_per_thread = 8, 10
+
+        def _write_many():
+            store = LocalJSONGenerationRecordStore(path)  # own instance, same file
+            for _ in range(n_per_thread):
+                store.record("job:x", "tailor", "claude-sonnet-5", "end_turn", 1, 1, {})
+
+        threads = [_threading.Thread(target=_write_many) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        final = LocalJSONGenerationRecordStore(path).list_all()
+        assert len(final) == n_threads * n_per_thread
+        assert len({r["record_id"] for r in final}) == n_threads * n_per_thread
+        print("PASS test_local_json_store_record_is_thread_safe_under_concurrent_writes")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_record_from_response_extracts_fields()
     test_record_from_response_handles_missing_usage()
@@ -210,4 +277,7 @@ if __name__ == "__main__":
     test_monthly_cost_summary_groups_by_month_newest_first()
     test_monthly_cost_summary_counts_unpriced_calls_separately()
     test_monthly_cost_summary_handles_datetime_created_at()
+    test_monthly_cost_summary_converts_non_utc_datetime_to_utc_month()
+    test_monthly_cost_summary_marks_unpriced_models_in_by_model()
+    test_local_json_store_record_is_thread_safe_under_concurrent_writes()
     print("\nAll generation_records tests passed.")

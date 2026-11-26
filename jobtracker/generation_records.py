@@ -18,6 +18,7 @@ import collections
 import datetime
 import json
 import os
+import threading
 import uuid
 from pathlib import Path
 from typing import List, Optional
@@ -89,6 +90,18 @@ class PostgresGenerationRecordStore:
             return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+# issue #13: webapp.py constructs a FRESH LocalJSONGenerationRecordStore per
+# request (same reasoning as make_store() elsewhere -- no long-lived store
+# object), so a per-instance threading.Lock would do nothing to prevent two
+# concurrent requests (e.g. two background-thread generations) racing on the
+# SAME file -- only a lock shared across every instance actually serializes
+# the read-modify-write below. One process-wide lock is enough here: this
+# store only ever points at one real path (data/generation_records.json);
+# tests using different tmp paths share the lock too, which only makes them
+# slightly more serialized, never incorrect.
+_WRITE_LOCK = threading.Lock()
+
+
 class LocalJSONGenerationRecordStore:
     def __init__(self, path: str = "data/generation_records.json"):
         self.path = Path(path)
@@ -103,9 +116,8 @@ class LocalJSONGenerationRecordStore:
               input_tokens: Optional[int], output_tokens: Optional[int],
               raw_response: dict, cache_creation_input_tokens: Optional[int] = None,
               cache_read_input_tokens: Optional[int] = None) -> dict:
-        data = self._load()
         record_id = str(uuid.uuid4())
-        data.append({
+        entry = {
             "record_id": record_id, "job_id": job_id, "stage": stage, "model": model,
             "stop_reason": stop_reason, "input_tokens": input_tokens,
             "output_tokens": output_tokens,
@@ -113,8 +125,18 @@ class LocalJSONGenerationRecordStore:
             "cache_read_input_tokens": cache_read_input_tokens,
             "raw_response": raw_response,
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        })
-        self.path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        }
+        # Locked read-modify-write, so two concurrent generations (e.g. two
+        # background-thread workers) don't interleave and drop a row -- and
+        # an atomic rename (not an in-place write) so a /costs request
+        # reading the file mid-write always sees either the old or the new
+        # complete content, never a truncated partial write.
+        with _WRITE_LOCK:
+            data = self._load()
+            data.append(entry)
+            tmp_path = self.path.with_suffix(self.path.suffix + f".tmp-{record_id}")
+            tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp_path, self.path)
         return {"record_id": record_id}
 
     def list_for_job(self, job_id: str) -> List[dict]:
@@ -183,6 +205,15 @@ def _month_key(record: dict) -> str:
     both shapes need handling here rather than assuming one."""
     created_at = record.get("created_at")
     if isinstance(created_at, datetime.datetime):
+        # psycopg2 decodes TIMESTAMPTZ into a datetime in the CONNECTION's
+        # session timezone, not necessarily UTC -- converting here (rather
+        # than just formatting it as-is) is what makes this actually "the
+        # UTC month" for both backends, not just the local JSON one (which
+        # already stores UTC isoformat() strings). A naive datetime (no
+        # tzinfo) is assumed already UTC, same as the local JSON store's
+        # own writes.
+        if created_at.tzinfo is not None:
+            created_at = created_at.astimezone(datetime.timezone.utc)
         return created_at.strftime("%Y-%m")
     created_at = created_at or ""
     return created_at[:7] if len(created_at) >= 7 else "unknown"
@@ -213,10 +244,17 @@ def monthly_cost_summary(records: List[dict]) -> List[dict]:
 
         cost = cost_for_record(record)
         model = record.get("model") or "unknown"
-        by_model = month["by_model"].setdefault(model, {"calls": 0, "cost_usd": 0.0})
+        # `unpriced` distinguishes "costs nothing" from "price unknown" in
+        # the by_model breakdown too -- without it, a model missing from
+        # MODEL_PRICING renders identically to an actually-free one
+        # ($0.00), the exact ambiguity `unpriced_calls` exists to avoid at
+        # the month level.
+        by_model = month["by_model"].setdefault(
+            model, {"calls": 0, "cost_usd": 0.0, "unpriced": False})
         by_model["calls"] += 1
         if cost is None:
             month["unpriced_calls"] += 1
+            by_model["unpriced"] = True
         else:
             month["cost_usd"] += cost
             by_model["cost_usd"] += cost
