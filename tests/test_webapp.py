@@ -56,7 +56,7 @@ def main():
     # pinned to the example file here, not left to depend on whether a
     # real candidate.yaml happens to exist on whatever machine runs this.
     _example_candidate = generator.load_candidate(
-        Path(generator.ROOT) / "config" / "candidate.example.yaml")
+        generator.ROOT / "config" / "candidate.example.yaml")
     generator.load_candidate = lambda path=None: _example_candidate
 
     class _FakeRecordStore:
