@@ -142,18 +142,26 @@ def _render(candidate: dict, result: TailorResult, job: dict, lang: str, out_dir
 
 def generate_or_handoff(job: dict, candidate: Optional[dict] = None,
                         out_dir: Path = OUTPUT_DIR, client=None,
-                        set_status: Optional[Callable[[str], None]] = None) -> dict:
+                        set_status: Optional[Callable[[str], None]] = None,
+                        record_store=None) -> dict:
     """The ONLY generation entry point jobtracker/webapp.py calls. Returns
     a DRAFT on success -- {"state": "draft", "job":..., "candidate":...,
     "analysis":..., "lang": str, "style_example": str, "result":
     TailorResult} -- for review (issue #12), never a rendered document; or
     {"state": "handoff", "request_path": Path, "error": str} on any
-    unrecovered failure."""
+    unrecovered failure. `record_store` (issue #13) is opt-in -- None means
+    "don't record", same as tailor.py's own job_id/record_store parameters
+    -- so existing/test callers that don't pass one are unaffected (no
+    surprise write to the real data/generation_records.json or a Postgres
+    connection attempt during a test run). jobtracker/webapp.py is the one
+    real caller that constructs an actual store and passes it in."""
     candidate = candidate if candidate is not None else generator.load_candidate()
+    job_id = job.get("job_id", "")
     lang_guess = generator.detect_language(f"{job.get('title','')} {job.get('description','')}")
 
     try:
-        analysis = tailor.analyse_vacancy(job.get("description", ""), client=client)
+        analysis = tailor.analyse_vacancy(job.get("description", ""), client=client,
+                                          job_id=job_id, record_store=record_store)
     except _HANDOFF_EXCEPTIONS as e:
         path = write_handoff_request(job, candidate, lang_guess, str(e),
                                      analysis=None, out_dir=out_dir, set_status=set_status)
@@ -162,7 +170,8 @@ def generate_or_handoff(job: dict, candidate: Optional[dict] = None,
     style_example = generator.example_letter_text(analysis.language)
     try:
         result, errors = tailor.run_tailor_pipeline(job, analysis, candidate, style_example,
-                                                     client=client)
+                                                     client=client, job_id=job_id,
+                                                     record_store=record_store)
     except _HANDOFF_EXCEPTIONS as e:
         path = write_handoff_request(job, candidate, analysis.language, str(e),
                                      analysis=analysis, style_example=style_example,
@@ -236,7 +245,8 @@ def apply_handoff_upload(job: dict, generation_json: dict, candidate: Optional[d
 
 def regenerate(job: dict, analysis: AnalysisResult, candidate: dict, style_example: str = "",
                out_dir: Path = OUTPUT_DIR, client=None,
-               set_status: Optional[Callable[[str], None]] = None) -> dict:
+               set_status: Optional[Callable[[str], None]] = None,
+               record_store=None) -> dict:
     """issue #12: re-runs ONLY the tailor step -- the acceptance criteria's
     "without re-running the ingest/analyse steps" -- a single
     `tailor_application` call, no automatic validator-retry (confirmed
@@ -252,7 +262,8 @@ def regenerate(job: dict, analysis: AnalysisResult, candidate: dict, style_examp
     any other unrecovered one."""
     client = client if client is not None else tailor.make_client()
     try:
-        result = tailor.tailor_application(job, analysis, candidate, style_example, client=client)
+        result = tailor.tailor_application(job, analysis, candidate, style_example, client=client,
+                                           job_id=job.get("job_id", ""), record_store=record_store)
     except _HANDOFF_EXCEPTIONS as e:
         path = write_handoff_request(job, candidate, analysis.language, str(e),
                                      analysis=analysis, style_example=style_example,

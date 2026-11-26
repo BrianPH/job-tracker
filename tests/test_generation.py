@@ -482,6 +482,61 @@ def test_render_draft_applies_edits_and_writes_docx():
     _with_tmp_out(run)
 
 
+# --------------------------------------------------------------------------- #
+# issue #13: record_store is opt-in and threaded to both tailor.py calls      #
+# --------------------------------------------------------------------------- #
+class _FakeRecordStore:
+    def __init__(self):
+        self.calls = []
+
+    def record(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"record_id": "fake-id"}
+
+
+def test_generate_or_handoff_does_not_record_without_a_record_store():
+    # No record_store passed -- must not touch the real
+    # data/generation_records.json or attempt a Postgres connection.
+    def run(out):
+        analysis = AnalysisResult(language="en", requirements=["Python"])
+        tailor_result = _good_tailor_result()
+        client = _QueuedClient([_FakeResponse(analysis), _FakeResponse(tailor_result)])
+        result = generate_or_handoff(JOB, candidate=CANDIDATE, out_dir=out, client=client)
+        assert result["state"] == "draft"  # just confirms it still works with no store
+        print("PASS test_generate_or_handoff_does_not_record_without_a_record_store")
+    _with_tmp_out(run)
+
+
+def test_generate_or_handoff_records_both_calls_with_the_jobs_id():
+    def run(out):
+        analysis = AnalysisResult(language="en", requirements=["Python"])
+        tailor_result = _good_tailor_result()
+        client = _QueuedClient([_FakeResponse(analysis), _FakeResponse(tailor_result)])
+        store = _FakeRecordStore()
+        generate_or_handoff(JOB, candidate=CANDIDATE, out_dir=out, client=client,
+                            record_store=store)
+        assert len(store.calls) == 2
+        assert {c["stage"] for c in store.calls} == {"analyse", "tailor"}
+        assert all(c["job_id"] == JOB["job_id"] for c in store.calls)
+        print("PASS test_generate_or_handoff_records_both_calls_with_the_jobs_id")
+    _with_tmp_out(run)
+
+
+def test_regenerate_records_the_tailor_call():
+    def run(out):
+        analysis = AnalysisResult(language="en", requirements=["Python"])
+        new_result = _good_tailor_result()
+        client = _QueuedClient([_FakeResponse(new_result)])
+        store = _FakeRecordStore()
+        regenerate(JOB, analysis, CANDIDATE, "Dear team...", out_dir=out, client=client,
+                  record_store=store)
+        assert len(store.calls) == 1
+        assert store.calls[0]["stage"] == "tailor"
+        assert store.calls[0]["job_id"] == JOB["job_id"]
+        print("PASS test_regenerate_records_the_tailor_call")
+    _with_tmp_out(run)
+
+
 def test_render_draft_does_not_mutate_the_original_draft_result():
     # draft["result"] must stay untouched so "Regenerate" (which reads it
     # as the baseline) isn't corrupted by a prior Render's edits.
@@ -514,6 +569,9 @@ if __name__ == "__main__":
     test_regenerate_does_not_call_analyse_again()
     test_regenerate_surfaces_validation_errors_without_retrying()
     test_regenerate_sdk_failure_triggers_handoff()
+    test_generate_or_handoff_does_not_record_without_a_record_store()
+    test_generate_or_handoff_records_both_calls_with_the_jobs_id()
+    test_regenerate_records_the_tailor_call()
     test_render_draft_applies_edits_and_writes_docx()
     test_render_draft_does_not_mutate_the_original_draft_result()
     test_write_handoff_request_caps_description_like_the_live_prompts()
