@@ -75,8 +75,11 @@ python -m tests.test_webapp
   [Generating from a bare URL](#generating-from-a-bare-url) below.
 - **Daily scrape** — APScheduler runs the pipeline once a day at the configured
   hour, as long as the web app is running.
-- **Kosten** (`/costs`) — per-month Claude API spend, computed from the
-  `generation_records` store. See
+- **Kosten** (`/costs`) — per-month spend on the analyse/tailor pipeline
+  specifically, computed from the `generation_records` store; it does not
+  include the local-model or Anthropic-raw-HTTP fit-scoring path (see
+  [LLM fit-scoring](#llm-fit-scoring--generation--local-model-free)), which
+  writes no records. See
   [Prompt caching + cost overview](#prompt-caching--cost-overview) below.
 
 ## Access from your phone / other devices
@@ -270,6 +273,16 @@ second of two back-to-back tailor calls (e.g. a live generation followed by
 a "Regenerate") re-uses the cached facts block instead of paying full input
 price for it again — confirmed against the real API: the first call wrote
 ~1,900 cache tokens, the second read them back instead of rewriting them.
+
+This only pays off when a second call actually follows within the cache's
+5-minute window — the one-shot case (a single tailor call for a vacancy,
+with no retry and no "Regenerate") pays a small net PREMIUM instead,
+because writing the facts block into the cache costs 1.25× its normal input
+price, even though nothing ever reads it back. For the ~1,900-token facts
+block measured above on Sonnet 5, that premium is under a cent. The benefit
+shows up specifically on the validator's one automatic retry and on
+"Regenerate", both of which reuse the same facts block as a prior call to
+the same vacancy within the cache window.
 
 Every analyse/tailor call writes a row to the `generation_records` store
 (`jobtracker/generation_records.py`) — model id, token usage split into
