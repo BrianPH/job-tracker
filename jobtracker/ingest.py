@@ -28,11 +28,25 @@ hardened via safe_fetch/_validate_fetch_url below -- restricted to
 http/https, host resolved and rejected if it's private/loopback/link-local/
 etc, each redirect hop re-validated the same way (not just the original
 URL), and the response body capped while reading. The known-platform
-detail fetchers above (_detail_greenhouse etc.) build their request URL
-from a HARDCODED vendor host plus a regex-captured path -- the host is
-never user-controlled there, so they're intentionally NOT touched by this
-hardening; same for adapters.py's scrapers (fed from config/companies.yaml,
-an admin-trusted source, not user input).
+detail fetchers above build their request URL from a domain whose SUFFIX
+is a hardcoded vendor domain (e.g. "*.teamtailor.com", "*.recruitee.com")
+plus a path/subdomain captured from the user's URL -- an attacker cannot
+make that fixed suffix resolve to an internal address, but note this is
+NOT the same guarantee as a fully hardcoded host: _detail_teamtailor,
+_detail_workday, and _detail_recruitee specifically take their TENANT
+subdomain label from the regex capture, so a future looser pattern there
+could reopen this. They're intentionally not touched by this hardening
+either way; same for adapters.py's scrapers (fed from
+config/companies.yaml, an admin-trusted source, not user input).
+
+Residual risk (DNS rebinding): _validate_fetch_url resolves the host, then
+requests.get resolves it again, independently -- a hostname whose DNS
+answer changes between those two lookups (e.g. a short-TTL record that
+answers with a public IP on the first and a private one on the second)
+can still slip through. This hardening narrows the SSRF surface, it does
+not close it completely; the robust fix (pinning the validated address via
+a custom HTTPAdapter) is judged not worth the complexity for this
+single-user tool's threat model.
 """
 from __future__ import annotations
 
@@ -73,7 +87,7 @@ class UnsafeURLError(ValueError):
     "fetch_failed" page, no raw exception text shown)."""
 
 
-def _resolve_host(hostname: str) -> List["ipaddress._BaseAddress"]:
+def _resolve_host(hostname: str) -> List[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     """Thin wrapper over socket.getaddrinfo, isolated so tests can
     monkeypatch it instead of depending on real DNS -- every existing
     ingest test already fully mocks requests.get and uses made-up domains
@@ -84,9 +98,24 @@ def _resolve_host(hostname: str) -> List["ipaddress._BaseAddress"]:
     return [ipaddress.ip_address(info[4][0]) for info in infos]
 
 
+# Checked in ADDITION to the ipaddress is_private/is_loopback/etc flags
+# below -- not fully redundant with them. CGNAT (100.64.0.0/10, RFC 6598)
+# is NOT flagged "private" by Python's ipaddress module, yet it's used by
+# Tailscale and similar overlay networks, a plausible internal-service
+# range for exactly the kind of home/small-office server this tool runs
+# on. A short explicit list also keeps the policy single-sourced and
+# directly testable instead of silently drifting with whatever
+# is_private/is_reserved happen to mean in a given Python patch release.
+_EXTRA_DENIED_NETWORKS = (
+    ipaddress.ip_network("100.64.0.0/10"),  # CGNAT / Tailscale
+)
+
+
 def _is_unsafe_ip(ip) -> bool:
-    return (ip.is_private or ip.is_loopback or ip.is_link_local or
-            ip.is_multicast or ip.is_reserved or ip.is_unspecified)
+    if (ip.is_private or ip.is_loopback or ip.is_link_local or
+            ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+        return True
+    return any(ip.version == net.version and ip in net for net in _EXTRA_DENIED_NETWORKS)
 
 
 def _validate_fetch_url(url: str) -> None:
@@ -116,16 +145,17 @@ def _validate_fetch_url(url: str) -> None:
 
 def _read_capped_text(resp: requests.Response, max_bytes: int) -> str:
     """Reads `resp`'s body via iter_content (resp was requested with
-    stream=True), raising UnsafeURLError and closing the connection the
-    moment the accumulated size exceeds max_bytes -- capping bytes actually
-    read off the socket, not just truncating after a full download."""
+    stream=True), raising UnsafeURLError the moment the accumulated size
+    exceeds max_bytes -- capping bytes actually read off the socket, not
+    just truncating after a full download. Closing the connection on that
+    path is the caller's (safe_fetch's) job via its own try/finally, which
+    covers every exit from this function uniformly."""
     total = 0
     chunks = []
     for chunk in resp.iter_content(chunk_size=65536):
         chunks.append(chunk)
         total += len(chunk)
         if total > max_bytes:
-            resp.close()
             raise UnsafeURLError(f"Response exceeded the {max_bytes}-byte cap.")
     raw = b"".join(chunks)
     return raw.decode(resp.encoding or "utf-8", errors="replace")
@@ -137,21 +167,28 @@ def safe_fetch(url: str, *, headers=None, timeout=None,
     """requests.get, hardened against SSRF: validates scheme + resolved host
     before every request, including each redirect hop (allow_redirects is
     kept False so this function controls and re-validates each hop itself),
-    and caps the response body size while reading it."""
+    and caps the response body size while reading it. Every response is
+    fetched with stream=True, so it must be closed on every exit path --
+    including a raised exception, not just the redirect/success cases --
+    or a failing/oversized fetch leaks the pooled connection; the
+    try/finally below covers all of them uniformly."""
     current_url = url
     for _ in range(max_redirects + 1):
         _validate_fetch_url(current_url)
         resp = requests.get(current_url, headers=headers, timeout=timeout,
                            allow_redirects=False, stream=True)
-        if resp.is_redirect or resp.is_permanent_redirect:
-            location = resp.headers.get("Location")
+        try:
+            if resp.is_redirect:
+                location = resp.headers.get("Location")
+                if not location:
+                    raise UnsafeURLError(
+                        f"Redirect response from {current_url} had no Location header.")
+                current_url = urljoin(current_url, location)
+                continue
+            resp.raise_for_status()
+            return _read_capped_text(resp, max_bytes)
+        finally:
             resp.close()
-            if not location:
-                raise UnsafeURLError(f"Redirect response from {current_url} had no Location header.")
-            current_url = urljoin(current_url, location)
-            continue
-        resp.raise_for_status()
-        return _read_capped_text(resp, max_bytes)
     raise UnsafeURLError(f"Too many redirects (> {max_redirects}) fetching {url}.")
 
 

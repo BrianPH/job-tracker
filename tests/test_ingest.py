@@ -62,10 +62,10 @@ def _fake_get(responses, calls=None):
 
     issue #19: safe_fetch (used by fetch_generic) reads the body via
     resp.iter_content()/resp.encoding (stream=True) instead of the old bare
-    resp.text, and checks resp.is_redirect/is_permanent_redirect before
-    that -- every entry here gets those wired up too, in addition to the
-    pre-existing json/text/raise_for_status, so this ONE helper change
-    covers all ~15 existing callers rather than touching each test."""
+    resp.text, and checks resp.is_redirect before that -- every entry here
+    gets those wired up too, in addition to the pre-existing
+    json/text/raise_for_status, so this ONE helper change covers all ~15
+    existing callers rather than touching each test."""
     def fake_get(url, headers=None, timeout=None, **kwargs):
         if calls is not None:
             calls.append(url)
@@ -81,7 +81,6 @@ def _fake_get(responses, calls=None):
         resp.json = (lambda jb=json_body: jb) if json_body is not None else (lambda: {})
         resp.text = text_body
         resp.is_redirect = False
-        resp.is_permanent_redirect = False
         resp.encoding = "utf-8"
         body_bytes = (text_body or "").encode("utf-8")
         resp.iter_content = lambda chunk_size=65536, _b=body_bytes: iter(
@@ -547,6 +546,45 @@ def test_validate_fetch_url_rejects_literal_private_ip_without_mocked_dns():
     print("PASS test_validate_fetch_url_rejects_literal_private_ip_without_mocked_dns")
 
 
+def test_validate_fetch_url_rejects_cgnat_addresses():
+    # 100.64.0.0/10 (CGNAT/Tailscale) is NOT flagged "private" by Python's
+    # ipaddress module, but it's a plausible internal-service range on the
+    # kind of home/small-office server this tool runs on -- the explicit
+    # _EXTRA_DENIED_NETWORKS list closes that gap.
+    with patch.object(ingest, "_resolve_host",
+                      lambda h: [ipaddress.ip_address("100.64.0.1")]):
+        try:
+            ingest._validate_fetch_url("http://tailscale-host.example/x")
+        except UnsafeURLError:
+            pass
+        else:
+            raise AssertionError("expected UnsafeURLError for a CGNAT address")
+    print("PASS test_validate_fetch_url_rejects_cgnat_addresses")
+
+
+def test_safe_fetch_closes_the_connection_on_a_failing_status():
+    # stream=True means the connection stays open until closed; a 4xx/5xx
+    # that raise_for_status() turns into an exception must still close it,
+    # or every failing generic fetch leaks a pooled connection.
+    def fake_get(url, headers=None, timeout=None, **kwargs):
+        resp = MagicMock()
+        resp.is_redirect = False
+        resp.raise_for_status = MagicMock(side_effect=requests.HTTPError("404 error"))
+        resp.close = MagicMock()
+        fake_get.last_resp = resp
+        return resp
+
+    with patch("jobtracker.ingest.requests.get", fake_get):
+        try:
+            ingest.safe_fetch("https://external.example/missing")
+        except requests.HTTPError:
+            pass
+        else:
+            raise AssertionError("expected requests.HTTPError to propagate")
+    fake_get.last_resp.close.assert_called_once()
+    print("PASS test_safe_fetch_closes_the_connection_on_a_failing_status")
+
+
 def test_safe_fetch_revalidates_each_redirect_hop():
     # The core "re-validate after redirects" requirement: the ORIGINAL url
     # resolves safely, but the Location it redirects to resolves to a
@@ -560,7 +598,6 @@ def test_safe_fetch_revalidates_each_redirect_hop():
         if url == "https://external.example/start":
             resp = MagicMock()
             resp.is_redirect = True
-            resp.is_permanent_redirect = False
             resp.headers = {"Location": "https://internal.example/secret"}
             resp.close = MagicMock()
             return resp
@@ -589,7 +626,6 @@ def test_safe_fetch_rejects_response_exceeding_max_bytes():
     def fake_get(url, headers=None, timeout=None, **kwargs):
         resp = MagicMock()
         resp.is_redirect = False
-        resp.is_permanent_redirect = False
         resp.raise_for_status = lambda: None
         resp.encoding = "utf-8"
         resp.iter_content = lambda chunk_size=65536: iter([big_chunk] * 10)  # 10,000 bytes
@@ -610,7 +646,6 @@ def test_safe_fetch_rejects_too_many_redirects():
     def fake_get(url, headers=None, timeout=None, **kwargs):
         resp = MagicMock()
         resp.is_redirect = True
-        resp.is_permanent_redirect = False
         resp.headers = {"Location": url + "/next"}  # redirects forever, never terminates
         resp.close = MagicMock()
         return resp
@@ -702,6 +737,8 @@ if __name__ == "__main__":
     test_validate_fetch_url_rejects_private_loopback_and_link_local_hosts()
     test_validate_fetch_url_rejects_unresolvable_host()
     test_validate_fetch_url_rejects_literal_private_ip_without_mocked_dns()
+    test_validate_fetch_url_rejects_cgnat_addresses()
+    test_safe_fetch_closes_the_connection_on_a_failing_status()
     test_safe_fetch_revalidates_each_redirect_hop()
     test_safe_fetch_rejects_response_exceeding_max_bytes()
     test_safe_fetch_rejects_too_many_redirects()
