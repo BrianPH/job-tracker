@@ -339,12 +339,12 @@ tenant subdomain label taken from the user's URL (Teamtailor, Workday,
 Recruitee); an attacker cannot make that fixed suffix resolve to an
 internal address. The generic fetch itself is restricted to `http`/
 `https`, resolves the host and rejects it if any resolved address is
-private/loopback/link-local/multicast/reserved/unspecified, or carrier-grade
-NAT (the 100.64.0.0/10 range also used by Tailscale-style overlay
-networks) — covering, among others, the common internal-host and
+private/loopback/link-local/multicast/reserved/unspecified, or
+carrier-grade NAT (the 100.64.0.0/10 range also used by Tailscale-style
+overlay networks) — covering, among others, the common internal-host and
 cloud-metadata-endpoint targets. It also caps the response body read from
-the socket, and re-validates the target host on
-every redirect hop — not just the original URL, since a redirect can
+the socket, and re-validates the target host on every redirect hop — not
+just the original URL, since a redirect can
 repoint at an internal host even when the original URL was a legitimate
 external one. The Playwright fallback validates its initial URL the same
 way, but does not re-validate redirects the browser follows internally.
