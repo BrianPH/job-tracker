@@ -75,6 +75,9 @@ python -m tests.test_webapp
   [Generating from a bare URL](#generating-from-a-bare-url) below.
 - **Daily scrape** — APScheduler runs the pipeline once a day at the configured
   hour, as long as the web app is running.
+- **Kosten** (`/costs`) — per-month Claude API spend, computed from the
+  `generation_records` store. See
+  [Prompt caching + cost overview](#prompt-caching--cost-overview) below.
 
 ## Access from your phone / other devices
 
@@ -256,9 +259,27 @@ This module is unit-tested (`tests/test_tailor.py`, `tests/test_generation.py`,
 `TailorResult`/upload payloads for day-to-day runs; see the previous
 paragraph for what the one live-API run so far was for.
 
-A `generation_records` store (`jobtracker/generation_records.py`) exists for
-per-call token-usage/stop-reason auditing, but no caller populates it yet —
-a known gap, likely to be closed alongside cost tracking (issue #13).
+### Prompt caching + cost overview
+
+The tailor call's "facts block" — `candidate.yaml`'s bullet bank, education,
+skills, and style example — is identical across every vacancy for a given
+candidate/language, so it's sent as a separate, cached content block
+(`cache_control: {"type": "ephemeral"}`, the default 5-minute TTL) ahead of
+the per-vacancy block, which is never cached. In practice this means the
+second of two back-to-back tailor calls (e.g. a live generation followed by
+a "Regenerate") re-uses the cached facts block instead of paying full input
+price for it again — confirmed against the real API: the first call wrote
+~1,900 cache tokens, the second read them back instead of rewriting them.
+
+Every analyse/tailor call writes a row to the `generation_records` store
+(`jobtracker/generation_records.py`) — model id, token usage split into
+plain/cache-write/cache-read, stop_reason, and the raw response — and the
+**Kosten** page (`/costs`) totals this per month, with a per-model
+breakdown, using a hand-maintained pricing table in that module (there is no
+pricing API to query; update `MODEL_PRICING` there if Anthropic's rates
+change). A row whose model isn't in that table still counts toward
+`calls`/token totals but is reported separately as `unpriced_calls` rather
+than silently under-stating spend.
 
 ### Generating from a bare URL
 
@@ -528,7 +549,9 @@ config/profile.yaml ───┘       ▲                                      
   writes the `request.json` handoff and flips the job's status. The only
   generation entry points `jobtracker/webapp.py` calls.
 - `jobtracker/generation_records.py` — `generation_records` storage (model
-  id, token usage, stop_reason, raw response) per analyse/tailor call.
+  id, token usage incl. prompt-cache read/write, stop_reason, raw response)
+  per analyse/tailor call, plus the pricing table and `monthly_cost_summary()`
+  behind the `/costs` page.
 - `jobtracker/ingest.py` — generate from a bare URL/pasted text: known-platform
   detail re-fetch, trafilatura extraction, optional Playwright fallback.
 - `jobtracker/snapshots.py` — `vacancy_snapshots` storage for ingested vacancies.
@@ -559,5 +582,6 @@ config/profile.yaml ───┘       ▲                                      
 - [x] JSON handoff (request.json/generation.json) when the Claude API call
       fails, replacing the old silent template fallback
 - [x] Generation review page: requirement map, edit, regenerate, render
+- [x] Prompt caching for the tailor call + per-month cost overview (`/costs`)
 - [ ] E-mail/Slack digest of new high-score matches
 - [ ] Playwright-based adapter for JS-rendered career sites
