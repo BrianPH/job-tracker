@@ -48,7 +48,9 @@ def test_detect_language():
 
 
 def test_candidate_config_loads():
-    c = load_candidate()
+    # Pin to the example file -- the bare fallback resolves to the real,
+    # git-ignored candidate.yaml on a host that has actually run this app.
+    c = load_candidate(EXAMPLE_PATH)
     assert c["personal"]["name"]
     assert c["experience"] and c["education"] and c["skills"]
     # bullet-bank shape: every bullet has a stable id + bilingual text
