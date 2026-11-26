@@ -200,6 +200,9 @@ def main():
         assert webapp.DRAFTS["test:1"] is fake_draft
         print("PASS valid generation.json upload produces a draft and clears the handoff state")
 
+        # A stale draft (e.g. from an EARLIER successful upload/generate for
+        # this job_id) must not survive a now-failed re-upload either.
+        webapp.DRAFTS["test:1"] = {"result": "stale"}
         webapp.GENERATION["test:1"] = {"state": "handoff", "error": "no credit", "files": []}
         with patch("jobtracker.webapp.generation.apply_handoff_upload",
                   lambda job, data, **kw: {"state": "invalid", "errors": ["bad bullet id"]}):
@@ -209,7 +212,8 @@ def main():
         assert r.status_code == 303
         assert webapp.GENERATION["test:1"]["state"] == "handoff"
         assert "bad bullet id" in webapp.GENERATION["test:1"]["error"]
-        print("PASS invalid generation.json upload stays in the handoff state with the errors shown")
+        assert "test:1" not in webapp.DRAFTS
+        print("PASS invalid generation.json upload stays in the handoff state and clears any stale draft")
 
         files = {"generation_file": ("generation.json", b"not json at all", "application/json")}
         r = client.post("/jobs/test:1/generation-upload", files=files, follow_redirects=False)
@@ -375,6 +379,22 @@ def main():
         assert "Para one." in letter_text and "Para two." in letter_text
         assert "Para three." in letter_text
         print("PASS review render splits CRLF-normalized textarea input into separate paragraphs")
+
+        # A "blank" line with a stray space/tab (easy to pick up editing in
+        # a textarea) must still count as the paragraph break.
+        webapp.DRAFTS["test:1"] = draft
+        webapp.GENERATION["test:1"] = {"state": "draft", "files": []}
+        r = client.post("/jobs/test:1/review/render", data={
+            "profile": "An edited profile.",
+            "letter": "Para one.\n \nPara two.",
+            "bullets": [],
+        }, follow_redirects=False)
+        assert r.status_code == 303 and webapp.GENERATION["test:1"]["state"] == "done"
+        cv_path, letter_path = [test_out_dir / p for p in webapp.GENERATION["test:1"]["files"]]
+        body_paragraphs = [p.text.strip() for p in docx.Document(str(letter_path)).paragraphs
+                           if p.text.strip() in ("Para one.", "Para two.")]
+        assert body_paragraphs == ["Para one.", "Para two."]  # two SEPARATE paragraphs, not merged
+        print("PASS a whitespace-only blank line still splits paragraphs")
 
         # Empty profile/letter must not 422 or silently render a bodyless
         # document -- redirect back to the review page with the draft intact.

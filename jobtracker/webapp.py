@@ -271,6 +271,7 @@ async def generation_upload(job_id: str, generation_file: UploadFile = File(...)
         data = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         current = GENERATION.get(job_id, {})
+        DRAFTS.pop(job_id, None)  # a stale draft must not survive a failed re-upload either
         GENERATION[job_id] = {**current, "state": "handoff",
                               "error": "Uploaded file is not valid JSON."}
         return RedirectResponse(_redirect_target(job_id), status_code=303)
@@ -279,6 +280,7 @@ async def generation_upload(job_id: str, generation_file: UploadFile = File(...)
                                              set_status=_set_status_fn(job_id))
     if result["state"] == "invalid":
         current = GENERATION.get(job_id, {})
+        DRAFTS.pop(job_id, None)
         GENERATION[job_id] = {**current, "state": "handoff",
                               "error": "; ".join(result["errors"])}
     else:
@@ -301,9 +303,10 @@ def _split_letter_paragraphs(text: str) -> list:
     the HTML spec), so a plain `"\\n\\n"` split leaves every paragraph
     carrying literal "\\r\\n" instead of actually splitting -- normalize
     first, then split on one-or-more blank lines regardless of which line
-    ending was used."""
+    ending was used -- a "blank" line containing stray spaces/tabs (easy to
+    pick up editing in a textarea) still counts as the break."""
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    return [p.strip() for p in re.split(r"\n{2,}", normalized) if p.strip()]
+    return [p.strip() for p in re.split(r"\n[ \t]*\n+", normalized) if p.strip()]
 
 
 def _review_context(job_id: str, job: dict, draft: dict) -> dict:
