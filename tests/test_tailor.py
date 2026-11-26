@@ -196,6 +196,18 @@ def test_analyse_vacancy_no_client_raises():
 # --------------------------------------------------------------------------- #
 # tailor_application                                                          #
 # --------------------------------------------------------------------------- #
+def _prompt_text(kwargs: dict) -> str:
+    """issue #13: tailor_application's user content is now a list of two
+    text blocks (facts block + vacancy block, so the facts block can carry
+    `cache_control`) instead of one plain string. Tests that only care about
+    "does the prompt contain X" don't need to care about that split -- join
+    both blocks' text back into one string, same as before the change."""
+    content = kwargs["messages"][0]["content"]
+    if isinstance(content, str):
+        return content
+    return "\n".join(block["text"] for block in content)
+
+
 def _sample_tailor_result():
     return TailorResult(
         language="en", profile="A tailored profile. " * 10,
@@ -215,9 +227,10 @@ def test_tailor_application_valid_response():
     assert out is result
     kwargs = client.captured[0]
     assert kwargs["output_format"] is TailorResult
-    assert "examplecorp" in kwargs["messages"][0]["content"]  # bullet bank reached the prompt
-    assert "Data Engineer" in kwargs["messages"][0]["content"]
-    assert "example-university" in kwargs["messages"][0]["content"]  # education ids too
+    prompt = _prompt_text(kwargs)
+    assert "examplecorp" in prompt  # bullet bank reached the prompt
+    assert "Data Engineer" in prompt
+    assert "example-university" in prompt  # education ids too
     assert kwargs["thinking"] == {"type": "disabled"}
     print("PASS test_tailor_application_valid_response")
 
@@ -239,7 +252,7 @@ def test_tailor_application_caps_description_at_desc_chars():
     job = {"title": "Data Engineer", "company": "Acme", "description": long_description}
     analysis = AnalysisResult(language="en")
     tailor_application(job, analysis, CANDIDATE, client=client)
-    prompt = client.captured[0]["messages"][0]["content"]
+    prompt = _prompt_text(client.captured[0])
     assert long_description not in prompt
     assert ("x" * VACANCY_DESC_CHARS) in prompt
     assert ("x" * (VACANCY_DESC_CHARS + 1)) not in prompt
@@ -352,7 +365,7 @@ def test_tailor_application_includes_retry_errors_in_prompt():
     analysis = AnalysisResult(language="en")
     tailor_application(job, analysis, CANDIDATE, client=client,
                        retry_errors=["bullets['x'] references unknown bullet id 'y'."])
-    prompt = client.captured[0]["messages"][0]["content"]
+    prompt = _prompt_text(client.captured[0])
     assert "failed validation" in prompt
     assert "unknown bullet id 'y'" in prompt
     print("PASS test_tailor_application_includes_retry_errors_in_prompt")
@@ -427,7 +440,7 @@ def test_run_tailor_pipeline_retries_once_then_succeeds():
     assert out is good
     assert errors == []
     assert len(client.captured) == 2
-    assert "no-such-bullet" in client.captured[1]["messages"][0]["content"]
+    assert "no-such-bullet" in _prompt_text(client.captured[1])
     print("PASS test_run_tailor_pipeline_retries_once_then_succeeds")
 
 
@@ -448,6 +461,122 @@ def test_run_tailor_pipeline_returns_remaining_errors_when_retry_also_fails():
     assert len(errors) == 1 and "still-no-such-bullet" in errors[0]
     assert len(client.captured) == 2  # only one retry, not a retry loop
     print("PASS test_run_tailor_pipeline_returns_remaining_errors_when_retry_also_fails")
+
+
+# --------------------------------------------------------------------------- #
+# issue #13: prompt caching + generation_records wiring                       #
+# --------------------------------------------------------------------------- #
+class _FakeRecordStore:
+    def __init__(self):
+        self.calls = []
+
+    def record(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"record_id": "fake-id"}
+
+
+def test_tailor_application_caches_only_the_facts_block():
+    # The facts block (bullet bank/education/skills/style example) is
+    # identical across every vacancy for a given candidate -- it must carry
+    # cache_control and come FIRST (caching needs the stable prefix first).
+    # The vacancy/analysis block changes every call, so it must NOT be
+    # cached.
+    client = _FakeClient(_FakeResponse(_sample_tailor_result()))
+    job = {"title": "Data Engineer", "company": "Acme", "description": "Build things."}
+    analysis = AnalysisResult(language="en", requirements=["Python"])
+    tailor_application(job, analysis, CANDIDATE, style_example="Dear team...", client=client)
+    content = client.captured[0]["messages"][0]["content"]
+    assert len(content) == 2
+    facts_block, vacancy_block = content
+    assert facts_block.get("cache_control") == {"type": "ephemeral"}
+    assert "BULLET BANK" in facts_block["text"]
+    assert "cache_control" not in vacancy_block
+    assert "Data Engineer" in vacancy_block["text"]
+    print("PASS test_tailor_application_caches_only_the_facts_block")
+
+
+def test_tailor_application_facts_block_is_stable_across_calls():
+    # Caching only helps if the cached block is byte-identical call to call
+    # for the same candidate/language -- changing the vacancy must not touch
+    # the facts block's text at all.
+    client = _FakeClient(_FakeResponse(_sample_tailor_result()))
+    analysis = AnalysisResult(language="en")
+    tailor_application({"title": "Data Engineer", "company": "Acme", "description": "A"},
+                       analysis, CANDIDATE, style_example="Dear team...", client=client)
+    tailor_application({"title": "Backend Engineer", "company": "Other", "description": "B"},
+                       analysis, CANDIDATE, style_example="Dear team...", client=client)
+    first_facts = client.captured[0]["messages"][0]["content"][0]["text"]
+    second_facts = client.captured[1]["messages"][0]["content"][0]["text"]
+    assert first_facts == second_facts
+    print("PASS test_tailor_application_facts_block_is_stable_across_calls")
+
+
+def test_analyse_vacancy_records_only_when_job_id_and_store_given():
+    store = _FakeRecordStore()
+    client = _FakeClient(_FakeResponse(AnalysisResult(language="en")))
+    analyse_vacancy("Some vacancy text.", client=client)  # no job_id/store
+    assert store.calls == []
+
+    analyse_vacancy("Some vacancy text.", client=client, job_id="job-1", record_store=store)
+    assert len(store.calls) == 1
+    assert store.calls[0]["job_id"] == "job-1"
+    assert store.calls[0]["stage"] == "analyse"
+    print("PASS test_analyse_vacancy_records_only_when_job_id_and_store_given")
+
+
+def test_tailor_application_records_cache_tokens():
+    class _CacheUsage(_FakeUsage):
+        def __init__(self):
+            super().__init__()
+            self.cache_creation_input_tokens = 500
+            self.cache_read_input_tokens = 50
+
+    store = _FakeRecordStore()
+    client = _FakeClient(_FakeResponse(_sample_tailor_result(), usage=_CacheUsage()))
+    job = {"title": "Data Engineer", "company": "Acme", "description": "Build things.",
+          "job_id": "job-2"}
+    analysis = AnalysisResult(language="en")
+    tailor_application(job, analysis, CANDIDATE, client=client,
+                       job_id="job-2", record_store=store)
+    assert len(store.calls) == 1
+    assert store.calls[0]["cache_creation_input_tokens"] == 500
+    assert store.calls[0]["cache_read_input_tokens"] == 50
+    assert store.calls[0]["stage"] == "tailor"
+    print("PASS test_tailor_application_records_cache_tokens")
+
+
+def test_record_store_failure_does_not_break_generation():
+    # The generation already succeeded by the time recording runs -- a
+    # record_store write failure (disk full, DB down) must not turn a
+    # working generation into an error.
+    class _BrokenStore:
+        def record(self, **kwargs):
+            raise RuntimeError("disk full")
+
+    result = _sample_tailor_result()
+    client = _FakeClient(_FakeResponse(result))
+    job = {"title": "Data Engineer", "company": "Acme", "description": "Build things."}
+    analysis = AnalysisResult(language="en")
+    out = tailor_application(job, analysis, CANDIDATE, client=client,
+                             job_id="job-3", record_store=_BrokenStore())
+    assert out is result
+    print("PASS test_record_store_failure_does_not_break_generation")
+
+
+def test_run_tailor_pipeline_records_each_call():
+    bad = TailorResult(language="en", profile="A tailored profile. " * 10,
+                       experience_order=["examplecorp"],
+                       bullets={"examplecorp": ["no-such-bullet"]},
+                       letter_paragraphs=["Paragraph one. " * 20, "Paragraph two. " * 20])
+    good = _sample_tailor_result()
+    store = _FakeRecordStore()
+    client = _SequentialClient([_FakeResponse(bad), _FakeResponse(good)])
+    job = {"title": "Data Engineer", "company": "Acme", "description": "Build things."}
+    analysis = AnalysisResult(language="en")
+    run_tailor_pipeline(job, analysis, CANDIDATE, client=client,
+                        job_id="job-4", record_store=store)
+    assert len(store.calls) == 2  # initial attempt + retry, one row each
+    print("PASS test_run_tailor_pipeline_records_each_call")
 
 
 def test_make_client_returns_none_without_api_key():
@@ -494,4 +623,10 @@ if __name__ == "__main__":
     test_run_tailor_pipeline_no_retry_when_first_reply_is_valid()
     test_run_tailor_pipeline_retries_once_then_succeeds()
     test_run_tailor_pipeline_returns_remaining_errors_when_retry_also_fails()
+    test_tailor_application_caches_only_the_facts_block()
+    test_tailor_application_facts_block_is_stable_across_calls()
+    test_analyse_vacancy_records_only_when_job_id_and_store_given()
+    test_tailor_application_records_cache_tokens()
+    test_record_store_failure_does_not_break_generation()
+    test_run_tailor_pipeline_records_each_call()
     print("\nAll tailor tests passed.")

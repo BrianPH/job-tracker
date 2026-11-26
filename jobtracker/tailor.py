@@ -234,8 +234,30 @@ def _education_text(candidate: dict, lang: str) -> str:
     return "\n".join(lines)
 
 
-def analyse_vacancy(vacancy_text: str, client=None, model: Optional[str] = None) -> AnalysisResult:
-    """Haiku call: vacancy text -> structured AnalysisResult."""
+def _record(record_store, job_id: Optional[str], stage: str, model: str, response) -> None:
+    """Best-effort audit row (issue #13) -- only written when BOTH a job_id
+    and a record_store are given (opt-in, so every existing caller/test that
+    passes neither keeps working unchanged, same dependency-injection style
+    as `client`). The actual generation has already succeeded by the time
+    this runs, so a store failure (disk full, DB down) is logged and
+    swallowed rather than turning a working generation into an error."""
+    if not job_id or record_store is None:
+        return
+    from . import generation_records
+    try:
+        data = generation_records.record_from_response(job_id, stage, model, response)
+        record_store.record(**data)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).exception(
+            "generation_records write failed for job %s (%s)", job_id, stage)
+
+
+def analyse_vacancy(vacancy_text: str, client=None, model: Optional[str] = None,
+                    job_id: Optional[str] = None, record_store=None) -> AnalysisResult:
+    """Haiku call: vacancy text -> structured AnalysisResult. No facts block
+    here (nothing candidate-specific is sent), so no prompt caching applies
+    -- issue #13's caching is tailor_application-only, see there."""
     client = client if client is not None else make_client()
     if client is None:
         raise GenerationUnavailableError("No Anthropic client available (ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN both unset).")
@@ -251,45 +273,66 @@ def analyse_vacancy(vacancy_text: str, client=None, model: Optional[str] = None)
                    "content": f"VACANCY TEXT:\n{(vacancy_text or '')[:VACANCY_DESC_CHARS]}"}],
         output_format=AnalysisResult,
     )
+    _record(record_store, job_id, "analyse", model, response)
     if response.stop_reason == "max_tokens":
         raise GenerationTruncatedError(
             f"Analyse reply truncated at max_tokens={ANALYSE_MAX_TOKENS} (model {model}).")
     return response.parsed_output
 
 
-def tailor_application(job: dict, analysis: AnalysisResult, candidate: dict,
-                       style_example: str = "", client=None,
-                       model: Optional[str] = None,
-                       retry_errors: Optional[List[str]] = None) -> TailorResult:
-    """Sonnet call: analysis + bullet bank + style example -> structured
-    TailorResult. `style_example` is prior letters by the same candidate
-    (e.g. generator.example_letter_text(analysis.language)) -- optional
-    since not every checkout has one. `retry_errors` (issue #11/M3b) is
-    `generation_schema.validate_tailor_result`'s blocking-error list from a
-    PRIOR call against this same vacancy -- appended to the prompt so the
-    model can see exactly which ids it got wrong, rather than retrying blind."""
-    client = client if client is not None else make_client()
-    if client is None:
-        raise GenerationUnavailableError("No Anthropic client available (ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN both unset).")
-    model = model or os.getenv("ANTHROPIC_MODEL_WRITE", ANTHROPIC_MODEL_WRITE)
-    lang = analysis.language
-
-    user = (
-        f"VACANCY:\nTitle: {job.get('title','')}\nCompany: {job.get('company','')}\n"
-        f"Location: {job.get('location','')}\n"
-        f"Description: {(job.get('description') or '')[:VACANCY_DESC_CHARS]}\n\n"
-        f"ANALYSIS:\nRequirements: {', '.join(analysis.requirements)}\n"
-        f"Keywords: {', '.join(analysis.keywords)}\n\n"
+def _facts_block_text(candidate: dict, lang: str, style_example: str) -> str:
+    """The part of the tailor prompt that's IDENTICAL across every vacancy
+    for a given (candidate, language) -- the candidate's own bullet bank,
+    education, skills, and style example never depend on which job is being
+    tailored to. Issue #13 puts this in its own cacheable content block, so
+    it must be built the same way (and in the same order) on every call --
+    any call-to-call difference here (e.g. including the vacancy) would
+    invalidate the cache."""
+    return (
         f"BULLET BANK (role id / bullet id -- select and order from these ONLY):\n"
         f"{_bullet_bank_text(candidate, lang)}\n\n"
         f"EDUCATION (cite the education id directly for a degree requirement):\n"
         f"{_education_text(candidate, lang)}\n\n"
         f"SKILLS (select an ordered subset, verbatim):\n{_skills_text(candidate)}\n\n"
         f"STYLE EXAMPLE (previous letters by the same candidate):\n{style_example}\n\n"
+    )
+
+
+def tailor_application(job: dict, analysis: AnalysisResult, candidate: dict,
+                       style_example: str = "", client=None,
+                       model: Optional[str] = None,
+                       retry_errors: Optional[List[str]] = None,
+                       job_id: Optional[str] = None, record_store=None) -> TailorResult:
+    """Sonnet call: analysis + bullet bank + style example -> structured
+    TailorResult. `style_example` is prior letters by the same candidate
+    (e.g. generator.example_letter_text(analysis.language)) -- optional
+    since not every checkout has one. `retry_errors` (issue #11/M3b) is
+    `generation_schema.validate_tailor_result`'s blocking-error list from a
+    PRIOR call against this same vacancy -- appended to the prompt so the
+    model can see exactly which ids it got wrong, rather than retrying blind.
+
+    issue #13: the user content is TWO blocks, facts first (cached) then the
+    vacancy-specific part (never cached, changes every call) -- caching
+    requires the stable prefix to come first, which is why the facts block
+    moved ahead of the vacancy text here (previously a single string, vacancy
+    first). `job_id`/`record_store` are both optional and only take effect
+    together -- see `_record`."""
+    client = client if client is not None else make_client()
+    if client is None:
+        raise GenerationUnavailableError("No Anthropic client available (ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN both unset).")
+    model = model or os.getenv("ANTHROPIC_MODEL_WRITE", ANTHROPIC_MODEL_WRITE)
+    lang = analysis.language
+
+    vacancy_block = (
+        f"VACANCY:\nTitle: {job.get('title','')}\nCompany: {job.get('company','')}\n"
+        f"Location: {job.get('location','')}\n"
+        f"Description: {(job.get('description') or '')[:VACANCY_DESC_CHARS]}\n\n"
+        f"ANALYSIS:\nRequirements: {', '.join(analysis.requirements)}\n"
+        f"Keywords: {', '.join(analysis.keywords)}\n\n"
         f"Write the tailored CV/letter result now, in {_lang_name(lang)}."
     )
     if retry_errors:
-        user += (
+        vacancy_block += (
             "\n\nYour previous reply failed validation for these reasons -- "
             "fix them, using only ids/names from the lists above:\n" +
             "\n".join(f"- {e}" for e in retry_errors)
@@ -302,9 +345,15 @@ def tailor_application(job: dict, analysis: AnalysisResult, candidate: dict,
         max_tokens=TAILOR_MAX_TOKENS,
         thinking=THINKING_DISABLED,
         system=system,
-        messages=[{"role": "user", "content": user}],
+        messages=[{"role": "user", "content": [
+            {"type": "text",
+             "text": _facts_block_text(candidate, lang, style_example),
+             "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": vacancy_block},
+        ]}],
         output_format=TailorResult,
     )
+    _record(record_store, job_id, "tailor", model, response)
     if response.stop_reason == "max_tokens":
         raise GenerationTruncatedError(
             f"Tailor reply truncated at max_tokens={TAILOR_MAX_TOKENS} (model {model}).")
@@ -313,7 +362,9 @@ def tailor_application(job: dict, analysis: AnalysisResult, candidate: dict,
 
 def run_tailor_pipeline(job: dict, analysis: AnalysisResult, candidate: dict,
                         style_example: str = "", client=None,
-                        model: Optional[str] = None) -> Tuple[TailorResult, List[str]]:
+                        model: Optional[str] = None,
+                        job_id: Optional[str] = None, record_store=None
+                        ) -> Tuple[TailorResult, List[str]]:
     """issue #11/M3b: `tailor_application` plus ONE retry when the reply is
     structurally valid JSON but fails `generation_schema.validate_tailor_result`
     (an id that doesn't exist in candidate.yaml) -- a different failure mode
@@ -322,15 +373,19 @@ def run_tailor_pipeline(job: dict, analysis: AnalysisResult, candidate: dict,
     means the caller should treat this as a failed generation (JSON handoff),
     same as any other unrecovered failure -- this function itself never
     raises on a validation failure, only on an SDK/truncation error from
-    `tailor_application`."""
+    `tailor_application`. issue #13: the retry is a SEPARATE API call that
+    reuses the SAME facts block, so it gets its own generation_records row
+    and its own shot at a cache read."""
     client = client if client is not None else make_client()
 
     result = tailor_application(job, analysis, candidate, style_example,
-                                client=client, model=model)
+                                client=client, model=model,
+                                job_id=job_id, record_store=record_store)
     errors = validate_tailor_result(result, candidate)
     if errors:
         result = tailor_application(job, analysis, candidate, style_example,
-                                    client=client, model=model, retry_errors=errors)
+                                    client=client, model=model, retry_errors=errors,
+                                    job_id=job_id, record_store=record_store)
         errors = validate_tailor_result(result, candidate)
     return result, errors
 
