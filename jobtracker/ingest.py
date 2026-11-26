@@ -21,13 +21,27 @@ Every attempt writes a row to vacancy_snapshots (see snapshots.py) keyed by
 URL, so the text survives the posting going offline — including a thin-content
 failure, which still saves the raw HTML that was too short to extract from,
 in case a human wants to look at it later.
+
+issue #19 (SSRF hardening): fetch_generic/fetch_with_playwright take a URL
+whose HOST is attacker-controlled (the form accepts any URL), so both are
+hardened via safe_fetch/_validate_fetch_url below -- restricted to
+http/https, host resolved and rejected if it's private/loopback/link-local/
+etc, each redirect hop re-validated the same way (not just the original
+URL), and the response body capped while reading. The known-platform
+detail fetchers above (_detail_greenhouse etc.) build their request URL
+from a HARDCODED vendor host plus a regex-captured path -- the host is
+never user-controlled there, so they're intentionally NOT touched by this
+hardening; same for adapters.py's scrapers (fed from config/companies.yaml,
+an admin-trusted source, not user input).
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
-from typing import Callable, Optional, Tuple
-from urllib.parse import urlparse
+import socket
+from typing import Callable, List, Optional, Tuple
+from urllib.parse import urljoin, urlparse
 
 import requests
 import trafilatura
@@ -37,6 +51,108 @@ from .models import Job
 from .snapshots import make_snapshot_store
 
 MIN_EXTRACTED_CHARS = 200
+
+# --------------------------------------------------------------------------- #
+# issue #19: SSRF hardening for the generic (user-controlled host) fetch path #
+# --------------------------------------------------------------------------- #
+ALLOWED_SCHEMES = {"http", "https"}
+MAX_REDIRECTS = 5
+MAX_RESPONSE_BYTES = 5_000_000  # 5 MB -- generous for a job posting page;
+                                 # trafilatura only needs the extracted text.
+
+
+class UnsafeURLError(ValueError):
+    """Raised when a URL fails the SSRF safety checks: a non-http(s) scheme,
+    no host, an unresolvable host, a host resolving to any private/
+    loopback/link-local/multicast/reserved/unspecified address (checked for
+    every redirect hop, not just the original URL), or a response exceeding
+    MAX_RESPONSE_BYTES. Deliberately its own type, not IngestInputError --
+    a security rejection is a different kind of failure from a user typo,
+    even though jobtracker/webapp.py's existing generic `except Exception`
+    handler for /ingest already degrades both the same way (a safe
+    "fetch_failed" page, no raw exception text shown)."""
+
+
+def _resolve_host(hostname: str) -> List["ipaddress._BaseAddress"]:
+    """Thin wrapper over socket.getaddrinfo, isolated so tests can
+    monkeypatch it instead of depending on real DNS -- every existing
+    ingest test already fully mocks requests.get and uses made-up domains
+    (spa-example.com, acme-labs.com) that would otherwise either fail to
+    resolve in a network-restricted test sandbox or be flaky if one of
+    them happens to be registered for real."""
+    infos = socket.getaddrinfo(hostname, None)
+    return [ipaddress.ip_address(info[4][0]) for info in infos]
+
+
+def _is_unsafe_ip(ip) -> bool:
+    return (ip.is_private or ip.is_loopback or ip.is_link_local or
+            ip.is_multicast or ip.is_reserved or ip.is_unspecified)
+
+
+def _validate_fetch_url(url: str) -> None:
+    """Raises UnsafeURLError if `url` isn't safe to fetch server-side.
+    Called before every fetch attempt in this module, including each hop
+    of a redirect chain -- a redirect can repoint at an internal host even
+    when the original URL was a legitimate external one, and requests'
+    own allow_redirects=True would follow it without re-checking, since it
+    only ever sees the ORIGINAL url."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ALLOWED_SCHEMES:
+        raise UnsafeURLError(f"Unsupported URL scheme {parsed.scheme!r} (only http/https allowed).")
+    hostname = parsed.hostname
+    if not hostname:
+        raise UnsafeURLError("URL has no host.")
+    try:
+        addresses = _resolve_host(hostname)
+    except socket.gaierror as e:
+        raise UnsafeURLError(f"Could not resolve host {hostname!r}.") from e
+    if not addresses:
+        raise UnsafeURLError(f"Host {hostname!r} resolved to no addresses.")
+    for ip in addresses:
+        if _is_unsafe_ip(ip):
+            raise UnsafeURLError(
+                f"URL host {hostname!r} resolves to a disallowed address ({ip}).")
+
+
+def _read_capped_text(resp: requests.Response, max_bytes: int) -> str:
+    """Reads `resp`'s body via iter_content (resp was requested with
+    stream=True), raising UnsafeURLError and closing the connection the
+    moment the accumulated size exceeds max_bytes -- capping bytes actually
+    read off the socket, not just truncating after a full download."""
+    total = 0
+    chunks = []
+    for chunk in resp.iter_content(chunk_size=65536):
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > max_bytes:
+            resp.close()
+            raise UnsafeURLError(f"Response exceeded the {max_bytes}-byte cap.")
+    raw = b"".join(chunks)
+    return raw.decode(resp.encoding or "utf-8", errors="replace")
+
+
+def safe_fetch(url: str, *, headers=None, timeout=None,
+              max_redirects: int = MAX_REDIRECTS,
+              max_bytes: int = MAX_RESPONSE_BYTES) -> str:
+    """requests.get, hardened against SSRF: validates scheme + resolved host
+    before every request, including each redirect hop (allow_redirects is
+    kept False so this function controls and re-validates each hop itself),
+    and caps the response body size while reading it."""
+    current_url = url
+    for _ in range(max_redirects + 1):
+        _validate_fetch_url(current_url)
+        resp = requests.get(current_url, headers=headers, timeout=timeout,
+                           allow_redirects=False, stream=True)
+        if resp.is_redirect or resp.is_permanent_redirect:
+            location = resp.headers.get("Location")
+            resp.close()
+            if not location:
+                raise UnsafeURLError(f"Redirect response from {current_url} had no Location header.")
+            current_url = urljoin(current_url, location)
+            continue
+        resp.raise_for_status()
+        return _read_capped_text(resp, max_bytes)
+    raise UnsafeURLError(f"Too many redirects (> {max_redirects}) fetching {url}.")
 
 
 class ThinContentError(Exception):
@@ -208,9 +324,7 @@ def _fetch_known_platform(url: str) -> Optional[Tuple[str, Job, str]]:
 # --------------------------------------------------------------------------- #
 def fetch_generic(url: str) -> Tuple[str, str]:
     """Returns (raw_html, extracted_text)."""
-    resp = requests.get(url, headers=adapters.BROWSER_HEADERS, timeout=adapters.TIMEOUT)
-    resp.raise_for_status()
-    raw_html = resp.text
+    raw_html = safe_fetch(url, headers=adapters.BROWSER_HEADERS, timeout=adapters.TIMEOUT)
     extracted = trafilatura.extract(raw_html, url=url) or ""
     return raw_html, extracted
 
@@ -218,13 +332,20 @@ def fetch_generic(url: str) -> Tuple[str, str]:
 def fetch_with_playwright(url: str) -> Optional[str]:
     """Best-effort JS render for client-rendered pages. Only runs when
     PLAYWRIGHT_ENABLED=1 and the playwright package is installed; otherwise
-    returns None so the caller falls back to asking for pasted text."""
+    returns None so the caller falls back to asking for pasted text.
+
+    issue #19: the initial URL gets the same scheme/host validation as
+    fetch_generic before page.goto() -- redirects the BROWSER follows
+    internally are not individually re-validated (would need Playwright's
+    route-interception API); acceptable given this path is opt-in and not
+    installed by default."""
     if os.getenv("PLAYWRIGHT_ENABLED") != "1":
         return None
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         return None
+    _validate_fetch_url(url)
     with sync_playwright() as p:
         browser = p.chromium.launch()
         try:
