@@ -179,7 +179,18 @@ def index(request: Request, status: str = "", company: str = "", source: str = "
         "flt": {"status": status, "company": company, "source": source,
                 "q": q, "min_score": min_score, "remote": remote},
         "scrape": SCRAPE, "generation": _generation_view(jobs),
+        "bulk_updated": request.query_params.get("bulk_updated"),
+        "bulk_total": request.query_params.get("bulk_total"),
     })
+
+
+def _filter_redirect_target(f_status: str, f_company: str, f_source: str,
+                            f_q: str, f_min_score: str, f_remote: str) -> str:
+    params = {k: v for k, v in {
+        "status": f_status, "company": f_company, "source": f_source,
+        "q": f_q, "min_score": f_min_score, "remote": f_remote,
+    }.items() if v}
+    return f"/?{urlencode(params)}" if params else "/"
 
 
 @app.post("/jobs/{job_id}/status")
@@ -188,11 +199,31 @@ def set_status(job_id: str, status: str = Form(...),
                f_q: str = Form(""), f_min_score: str = Form(""), f_remote: str = Form("")):
     if status in STATUSES:
         _store().update_status(job_id, status)
-    params = {k: v for k, v in {
-        "status": f_status, "company": f_company, "source": f_source,
-        "q": f_q, "min_score": f_min_score, "remote": f_remote,
-    }.items() if v}
-    target = f"/?{urlencode(params)}" if params else "/"
+    target = _filter_redirect_target(f_status, f_company, f_source, f_q, f_min_score, f_remote)
+    return RedirectResponse(target, status_code=303)
+
+
+@app.post("/jobs/bulk-status")
+def bulk_set_status(job_ids: list = Form([]), status: str = Form(...),
+                    f_status: str = Form(""), f_company: str = Form(""), f_source: str = Form(""),
+                    f_q: str = Form(""), f_min_score: str = Form(""), f_remote: str = Form("")):
+    # Each update_status() is its own independent write (a fresh Postgres
+    # connection, or a full-file local-JSON rewrite, per call) -- there is no
+    # single transaction spanning the whole batch. A mid-batch failure (or a
+    # stale job_id that no longer exists -- update_status returns False, not
+    # an exception) must not look identical to a clean bulk update behind
+    # the blind 303, so count actual successes and surface "n of m" on the
+    # redirect rather than assuming every id in job_ids landed.
+    updated = 0
+    if status in STATUSES:
+        store = _store()
+        for job_id in job_ids:
+            if store.update_status(job_id, status):
+                updated += 1
+    target = _filter_redirect_target(f_status, f_company, f_source, f_q, f_min_score, f_remote)
+    if job_ids:
+        sep = "&" if "?" in target else "?"
+        target = f"{target}{sep}{urlencode({'bulk_updated': updated, 'bulk_total': len(job_ids)})}"
     return RedirectResponse(target, status_code=303)
 
 

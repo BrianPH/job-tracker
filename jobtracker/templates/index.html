@@ -45,13 +45,40 @@
 
 <div class="card">
   <p class="muted">{{ jobs|length }} vacatures</p>
+  {% if bulk_updated is not none %}
+    <p style="margin:8px 0 0">
+      {% if bulk_updated == bulk_total %}
+        <span class="ok">{{ bulk_updated }} van {{ bulk_total }} vacatures bijgewerkt.</span>
+      {% else %}
+        <span class="err">{{ bulk_updated }} van {{ bulk_total }} vacatures bijgewerkt — niet alle statussen konden worden opgeslagen.</span>
+      {% endif %}
+    </p>
+  {% endif %}
+
+  <form id="bulk-form" method="post" action="/jobs/bulk-status" class="bulk-bar">
+    <input type="hidden" name="f_status" value="{{ flt.status }}">
+    <input type="hidden" name="f_company" value="{{ flt.company }}">
+    <input type="hidden" name="f_source" value="{{ flt.source }}">
+    <input type="hidden" name="f_q" value="{{ flt.q }}">
+    <input type="hidden" name="f_min_score" value="{{ flt.min_score }}">
+    <input type="hidden" name="f_remote" value="{{ flt.remote }}">
+    <span id="bulk-count"></span>
+    <select name="status" required>
+      <option value="">Zet status op...</option>
+      {% for s in statuses %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+    </select>
+    <button type="button" id="bulk-apply">Toepassen</button>
+  </form>
+
   <table>
     <tr class="head">
+      <th><input type="checkbox" id="select-all" title="Selecteer alles"></th>
       <th>Score</th><th>Vacature</th><th>Bedrijf</th><th>Locatie</th>
       <th>Salaris</th><th>Geplaatst</th><th>Status</th><th>Documenten</th>
     </tr>
     {% for j in jobs %}
     <tr>
+      <td><input type="checkbox" class="row-check" data-id="{{ j.job_id }}"></td>
       <td data-label="Score">
         {% if j.fit_score is not none %}
           <span class="badge {% if j.fit_score >= 70 %}b-high{% elif j.fit_score >= 40 %}b-mid{% else %}b-low{% endif %}"
@@ -113,5 +140,62 @@
     {% endfor %}
   </table>
 </div>
+
+<script>
+(function () {
+  var checkboxes = Array.prototype.slice.call(document.querySelectorAll(".row-check"));
+  var selectAll = document.getElementById("select-all");
+  var bulkForm = document.getElementById("bulk-form");
+  var bulkCount = document.getElementById("bulk-count");
+  var lastChecked = null;
+
+  function updateBulkBar() {
+    var checked = checkboxes.filter(function (cb) { return cb.checked; });
+    bulkCount.textContent = checked.length ? checked.length + " geselecteerd" : "";
+    bulkForm.classList.toggle("visible", checked.length > 0);
+    if (selectAll) {
+      selectAll.checked = checked.length > 0 && checked.length === checkboxes.length;
+      selectAll.indeterminate = checked.length > 0 && checked.length < checkboxes.length;
+    }
+  }
+
+  checkboxes.forEach(function (cb, idx) {
+    cb.addEventListener("click", function (e) {
+      if (e.shiftKey && lastChecked !== null) {
+        var start = Math.min(lastChecked, idx), end = Math.max(lastChecked, idx);
+        for (var i = start; i <= end; i++) checkboxes[i].checked = cb.checked;
+      }
+      lastChecked = idx;
+      updateBulkBar();
+    });
+  });
+
+  if (selectAll) {
+    selectAll.addEventListener("change", function () {
+      checkboxes.forEach(function (cb) { cb.checked = selectAll.checked; });
+      lastChecked = null;  // a following shift-click must not anchor from a stale index
+      updateBulkBar();
+    });
+  }
+
+  document.getElementById("bulk-apply").addEventListener("click", function () {
+    var status = bulkForm.elements["status"].value;
+    if (!status) { alert("Kies eerst een status."); return; }
+    var checked = checkboxes.filter(function (cb) { return cb.checked; });
+    if (!checked.length) return;
+    bulkForm.querySelectorAll('input[name="job_ids"]').forEach(function (el) { el.remove(); });
+    checked.forEach(function (cb) {
+      var input = document.createElement("input");
+      input.type = "hidden";
+      input.name = "job_ids";
+      input.value = cb.dataset.id;
+      bulkForm.appendChild(input);
+    });
+    bulkForm.submit();
+  });
+
+  updateBulkBar();
+})();
+</script>
 
 {% endblock %}
