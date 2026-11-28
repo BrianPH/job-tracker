@@ -37,6 +37,7 @@ python -m tests.test_tailor
 python -m tests.test_generation_schema
 python -m tests.test_generation
 python -m tests.test_generation_records
+python -m tests.test_candidate_store
 python -m tests.test_ingest
 python -m tests.test_webapp
 ```

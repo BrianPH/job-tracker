@@ -68,3 +68,16 @@ ALTER TABLE generation_records ADD COLUMN IF NOT EXISTS cache_creation_input_tok
 ALTER TABLE generation_records ADD COLUMN IF NOT EXISTS cache_read_input_tokens     INTEGER;
 
 CREATE INDEX IF NOT EXISTS generation_records_job_idx ON generation_records (job_id);
+
+-- Candidate profile upload (job-tracker-candidate-profile-upload plan):
+-- a single row, not a list like `jobs` -- the structured fact bank
+-- (same shape as config/candidate.yaml) + the style-example cover letter
+-- text, both uploaded from /settings/candidate instead of living as files
+-- bind-mounted on the Pi. profile_id is always 'default' (single-user tool,
+-- no need for multiple profiles).
+CREATE TABLE IF NOT EXISTS candidate_profile (
+    profile_id      TEXT PRIMARY KEY DEFAULT 'default' CHECK (profile_id = 'default'),
+    candidate_data  JSONB,
+    style_example   TEXT,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);

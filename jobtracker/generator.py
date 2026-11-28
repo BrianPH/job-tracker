@@ -27,10 +27,14 @@ Output: applications/<Company>_<Title>/CV_<name>.docx + letter .docx.
 from __future__ import annotations
 
 import datetime
+import logging
 import re
 from pathlib import Path
+from typing import Optional
 
 import yaml
+
+from . import candidate_store
 
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATE_PATH = ROOT / "config" / "candidate.yaml"
@@ -48,7 +52,61 @@ DUTCH_MARKERS = (" en ", " het ", " een ", " wij ", " jij ", " je ", "ervaring",
 # --------------------------------------------------------------------------- #
 # Inputs                                                                       #
 # --------------------------------------------------------------------------- #
-def load_candidate(path: Path = CANDIDATE_PATH) -> dict:
+def _get_candidate_store():
+    """Indirection around candidate_store.make_candidate_store() -- same
+    reasoning as webapp.py's own _store()/_record_store() seams: tests patch
+    THIS attribute instead of a real call that would construct a
+    PostgresCandidateProfileStore (running schema.sql's full DDL against
+    whatever real DATABASE_URL is set) or a LocalJSONCandidateProfileStore
+    pointed at the real, CWD-relative data/candidate_profile.json -- either
+    of which would leak real host/database state into an "offline" test
+    run, exactly the trap tests/test_webapp.py's load_candidate pin exists
+    to avoid (see its comment) for the file-based path."""
+    return candidate_store.make_candidate_store()
+
+
+def _stored_candidate_data() -> Optional[dict]:
+    """The uploaded-via-/settings/candidate fact bank, or None when nothing
+    has been saved there yet (empty database, an explicitly empty dict --
+    treated the same as "nothing saved", not a distinct state worth
+    preserving -- or the store backend itself unreachable, e.g.
+    DATABASE_URL set but Postgres down). A store failure must not break
+    generation; it falls back to the file-based path the same as "nothing
+    uploaded", but IS logged -- silently swapping which candidate's facts a
+    CV gets generated from (the real profile vs. config/candidate.example.yaml's
+    "Alex Example") is exactly the kind of failure that must be visible,
+    not just safe."""
+    try:
+        row = _get_candidate_store().get()
+    except Exception:  # noqa: BLE001
+        # Named accurately: if config/candidate.yaml ALSO doesn't exist, the
+        # caller falls through one level further, to candidate.example.yaml
+        # -- the exact wrong-identity case this log line exists to surface.
+        logging.getLogger(__name__).exception(
+            "candidate_profile store unavailable; falling back to config/candidate.yaml, "
+            "or config/candidate.example.yaml if that is also missing")
+        return None
+    if row is None:
+        return None
+    return row.get("candidate_data") or None
+
+
+def load_candidate(path: Optional[Path] = None) -> dict:
+    """Callers that pass an explicit `path` (tests pinning to
+    candidate.example.yaml, or a "missing file" case) always read that file
+    directly -- the candidate_profile store is only consulted on the default,
+    no-argument call, so an explicit path keeps its exact pre-existing
+    behavior. On the no-argument path: prefer the store's candidate_data;
+    fall back to CANDIDATE_PATH (itself falling back to
+    candidate.example.yaml when missing) when the store has no saved resume
+    yet -- the resume and the cover-letter style example (see
+    example_letter_text()) are saved as separate actions, so a store row
+    can exist with only one of them populated."""
+    if path is None:
+        stored = _stored_candidate_data()
+        if stored is not None:
+            return stored
+        path = CANDIDATE_PATH
     if not path.exists():
         path = ROOT / "config" / "candidate.example.yaml"
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -84,20 +142,40 @@ def detect_language(text: str) -> str:
     return "nl" if hits >= 3 else "en"
 
 
-def example_letter_text(lang: str, max_chars: int = 2500) -> str:
-    """Concatenated example letters from Solliciteren/Motivatie.docx as a style guide."""
-    path = EXAMPLES_DIR / "Motivatie.docx"
-    if not path.exists():
-        return ""
+def _stored_style_example() -> str:
+    """The uploaded-via-/settings/candidate cover-letter text, or "" when
+    nothing has been saved there yet -- same "store failure looks like
+    empty, but logged" reasoning as _stored_candidate_data()."""
     try:
-        import docx
-        doc = docx.Document(str(path))
-        paras = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-    except Exception:  # noqa: BLE001 - style guide is optional
+        row = _get_candidate_store().get()
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception(
+            "candidate_profile store unavailable; falling back to Solliciteren/Motivatie.docx")
         return ""
-    text = "\n".join(paras)
+    if row is None:
+        return ""
+    return row.get("style_example") or ""
+
+
+def example_letter_text(lang: str, max_chars: int = 2500) -> str:
+    """Concatenated example letter(s) as a style guide for the tailor LLM
+    call. Prefers the style example uploaded via /settings/candidate; falls
+    back to Solliciteren/Motivatie.docx on disk when nothing has been
+    uploaded yet (legacy file-based setup, or no database yet)."""
+    text = _stored_style_example()
+    if not text:
+        path = EXAMPLES_DIR / "Motivatie.docx"
+        if not path.exists():
+            return ""
+        try:
+            import docx
+            doc = docx.Document(str(path))
+            paras = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+        except Exception:  # noqa: BLE001 - style guide is optional
+            return ""
+        text = "\n".join(paras)
     if lang == "en":
-        # the file holds both Dutch and English letters; prefer the English part
+        # the source holds both Dutch and English letters; prefer the English part
         m = re.search(r"Dear .*", text, re.DOTALL)
         if m:
             text = m.group(0)
