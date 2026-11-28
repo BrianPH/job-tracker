@@ -114,6 +114,36 @@ def main():
     assert json.loads(store_path.read_text())["test:2"]["status"] == "Rejected"
     print("PASS status update preserves active filters")
 
+    r = client.post("/jobs/bulk-status",
+                    data={"job_ids": ["test:1", "test:2"], "status": "Reviewing"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert "bulk_updated=2" in r.headers["location"] and "bulk_total=2" in r.headers["location"]
+    data = json.loads(store_path.read_text())
+    assert data["test:1"]["status"] == "Reviewing" and data["test:2"]["status"] == "Reviewing"
+    print("PASS bulk status update applies to every given job")
+
+    r = client.post("/jobs/bulk-status",
+                    data={"job_ids": ["test:1", "no-such-job"], "status": "Applied"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    # one of the two ids doesn't exist -- must report 1 of 2, not silently claim success
+    assert "bulk_updated=1" in r.headers["location"] and "bulk_total=2" in r.headers["location"]
+    assert json.loads(store_path.read_text())["test:1"]["status"] == "Applied"
+    print("PASS bulk status update reports partial success for a stale job id")
+
+    r = client.post("/jobs/bulk-status", data={"job_ids": [], "status": "Applied"},
+                    follow_redirects=False)
+    assert r.status_code == 303 and "bulk_updated" not in r.headers["location"]
+    print("PASS bulk status update with no job_ids is a no-op")
+
+    before = json.loads(store_path.read_text())["test:1"]["status"]
+    r = client.post("/jobs/bulk-status", data={"job_ids": ["test:1"], "status": "NotAStatus"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert json.loads(store_path.read_text())["test:1"]["status"] == before
+    print("PASS bulk status update rejects a status outside STATUSES")
+
     r = client.get("/settings")
     assert r.status_code == 200 and "Minimum salaris" in r.text
     print("PASS settings page renders setpoints")
