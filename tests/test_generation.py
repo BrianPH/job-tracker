@@ -4,6 +4,7 @@ the draft/regenerate/render split that puts a review step before anything
 is written to disk. Fake Anthropic clients, same dependency-injection
 pattern as tests/test_tailor.py -- no live API call."""
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -11,6 +12,20 @@ from pathlib import Path
 import docx
 import yaml
 
+# generation.generate_or_handoff()/regenerate() call generator.load_candidate()
+# and generator.example_letter_text() internally, which (since the
+# candidate_profile store landed) consult candidate_store.make_candidate_store()
+# -- that constructs a REAL PostgresCandidateProfileStore (running schema.sql's
+# full DDL against whatever DATABASE_URL happens to be set) whenever
+# DATABASE_URL/PGHOST/PGDATABASE are present in the environment. This is an
+# "offline" test module with no fake store injected for that path, so these
+# must be popped before any test runs -- same reasoning as
+# tests/test_webapp.py's identical pop, done there for the same reason.
+for _var in ("DATABASE_URL", "PGHOST", "PGDATABASE"):
+    os.environ.pop(_var, None)
+
+from jobtracker import generator
+from jobtracker.candidate_store import LocalJSONCandidateProfileStore
 from jobtracker.generation import (
     HANDOFF_STATUS,
     _request_path,
@@ -22,6 +37,19 @@ from jobtracker.generation import (
 )
 from jobtracker.generation_schema import AnalysisResult, TailorResult
 from jobtracker.tailor import CreditBalanceError
+
+# generation.py:170's example_letter_text() call is unconditional (no "skip
+# if given" the way load_candidate() has) -- even with DATABASE_URL popped
+# above, it would otherwise fall through to a REAL
+# LocalJSONCandidateProfileStore("data/candidate_profile.json"), CWD-relative
+# and bind-mounted on the Pi (docker-compose.yml), reading whatever real
+# style example the user has actually uploaded into this "offline" test run
+# (and creating a stray data/ dir wherever the tests happen to run). Pinned
+# to an empty store in a throwaway tmp dir for the same reason
+# tests/test_webapp.py pins its own copy of this seam.
+_CANDIDATE_STORE_TMP = tempfile.mkdtemp(prefix="jt_gentest_cand_")
+generator._get_candidate_store = lambda: LocalJSONCandidateProfileStore(
+    str(Path(_CANDIDATE_STORE_TMP) / "candidate_profile.json"))
 
 CANDIDATE = yaml.safe_load(open("config/candidate.example.yaml", encoding="utf-8"))
 JOB = {"job_id": "test:job-1", "title": "Data Engineer", "company": "Acme", "location": "Remote",

@@ -11,9 +11,12 @@ tests pass in any checkout -- see issue #9's acceptance criteria.
 import shutil
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import docx
 
+from jobtracker import generator as generator_module
+from jobtracker.candidate_store import LocalJSONCandidateProfileStore
 from jobtracker.generation_schema import TailorResult
 from jobtracker.generator import (
     ROOT,
@@ -23,6 +26,7 @@ from jobtracker.generator import (
     cv_render_context,
     cv_render_context_from_tailor_result,
     detect_language,
+    example_letter_text,
     letter_render_context,
     load_candidate,
 )
@@ -67,6 +71,131 @@ def test_load_candidate_falls_back_to_example_when_missing():
     c = load_candidate(missing)
     assert c["personal"]["name"] == "Alex Example"
     print("PASS test_load_candidate_falls_back_to_example_when_missing")
+
+
+# --------------------------------------------------------------------------- #
+# candidate_profile store integration (job-tracker-candidate-profile-upload   #
+# plan): load_candidate()/example_letter_text() with NO explicit path/file    #
+# must prefer the store, then fall back to the file-based path exactly as    #
+# before the store existed -- a test calling load_candidate(EXAMPLE_PATH)     #
+# (an explicit path) never touches the store at all, so these tests always   #
+# call the no-argument form.                                                  #
+# --------------------------------------------------------------------------- #
+def test_load_candidate_prefers_the_stored_profile_over_the_file():
+    tmp = Path(tempfile.mkdtemp(prefix="jt_gen_cand_"))
+    try:
+        store = LocalJSONCandidateProfileStore(str(tmp / "candidate_profile.json"))
+        store.save_candidate_data({"personal": {"name": "Stored Candidate"}})
+        with patch.object(generator_module, "_get_candidate_store", lambda: store):
+            c = load_candidate()
+            assert c["personal"]["name"] == "Stored Candidate"
+        print("PASS test_load_candidate_prefers_the_stored_profile_over_the_file")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_load_candidate_falls_back_to_file_when_store_has_no_resume_yet():
+    # The resume and the cover-letter style example are saved as SEPARATE
+    # actions -- a row that only ever had save_style_example() called on it
+    # must fall through to the file path for candidate_data, same as an
+    # entirely empty store.
+    tmp = Path(tempfile.mkdtemp(prefix="jt_gen_cand_"))
+    try:
+        store = LocalJSONCandidateProfileStore(str(tmp / "candidate_profile.json"))
+        store.save_style_example("Dear hiring manager, ...")
+        missing_path = ROOT / "config" / "candidate.yaml.does-not-exist"
+        with patch.object(generator_module, "_get_candidate_store", lambda: store), \
+             patch.object(generator_module, "CANDIDATE_PATH", missing_path):
+            c = load_candidate()
+            assert c["personal"]["name"] == "Alex Example"
+        print("PASS test_load_candidate_falls_back_to_file_when_store_has_no_resume_yet")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_load_candidate_tolerates_a_broken_store():
+    # DATABASE_URL set but Postgres unreachable (or any other store failure)
+    # must fall back to the file path, not break generation entirely.
+    def _boom():
+        raise RuntimeError("DATABASE_URL set but unreachable")
+
+    missing_path = ROOT / "config" / "candidate.yaml.does-not-exist"
+    with patch.object(generator_module, "_get_candidate_store", _boom), \
+         patch.object(generator_module, "CANDIDATE_PATH", missing_path):
+        c = load_candidate()
+        assert c["personal"]["name"] == "Alex Example"
+    print("PASS test_load_candidate_tolerates_a_broken_store")
+
+
+def test_load_candidate_with_explicit_path_never_touches_the_store():
+    # Guards the exact regression tests/test_webapp.py's load_candidate pin
+    # documents (a bare `load_candidate()` would otherwise pick up whatever
+    # real candidate.yaml happens to exist on the host running the test) --
+    # if a future change hoists the store lookup above `if path is None`,
+    # this must fail loudly instead of the explicit-path callers silently
+    # starting to depend on store state.
+    #
+    # The assertion is made OUTSIDE _get_candidate_store on purpose: raising
+    # from inside it does NOT work as a regression guard, because
+    # _stored_candidate_data()'s own `except Exception` would catch that
+    # raise (AssertionError is an Exception subclass), log it, and return
+    # None as if the store were merely empty -- load_candidate(EXAMPLE_PATH)
+    # would still return "Alex Example" and this test would pass even after
+    # the regression it exists to catch. Recording the call and asserting
+    # on the recording afterward cannot be swallowed that way.
+    with patch.object(generator_module, "_get_candidate_store") as mock_get_store:
+        c = load_candidate(EXAMPLE_PATH)
+        assert c["personal"]["name"] == "Alex Example"
+    mock_get_store.assert_not_called()
+    print("PASS test_load_candidate_with_explicit_path_never_touches_the_store")
+
+
+def test_example_letter_text_prefers_the_stored_style_example():
+    tmp = Path(tempfile.mkdtemp(prefix="jt_gen_letter_"))
+    try:
+        store = LocalJSONCandidateProfileStore(str(tmp / "candidate_profile.json"))
+        store.save_style_example("Geachte heer/mevrouw,\nStored letter body.")
+        with patch.object(generator_module, "_get_candidate_store", lambda: store):
+            text = example_letter_text("nl")
+            assert "Stored letter body." in text
+        print("PASS test_example_letter_text_prefers_the_stored_style_example")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_example_letter_text_falls_back_to_file_when_nothing_stored():
+    # EXAMPLES_DIR is pinned to a path that does NOT exist -- Solliciteren/
+    # is gitignored and absent in this sandbox, but IS bind-mounted and
+    # present on the real Pi deploy (docker-compose.yml), so asserting ""
+    # without pinning would pass here and fail there the moment a real
+    # Motivatie.docx exists.
+    tmp = Path(tempfile.mkdtemp(prefix="jt_gen_letter_"))
+    try:
+        store = LocalJSONCandidateProfileStore(str(tmp / "candidate_profile.json"))  # empty
+        missing_examples_dir = tmp / "no-such-examples-dir"
+        with patch.object(generator_module, "_get_candidate_store", lambda: store), \
+             patch.object(generator_module, "EXAMPLES_DIR", missing_examples_dir):
+            text = example_letter_text("nl")
+            assert text == ""
+        print("PASS test_example_letter_text_falls_back_to_file_when_nothing_stored")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_example_letter_text_tolerates_a_broken_store():
+    def _boom():
+        raise RuntimeError("DATABASE_URL set but unreachable")
+
+    tmp = Path(tempfile.mkdtemp(prefix="jt_gen_letter_"))
+    try:
+        missing_examples_dir = tmp / "no-such-examples-dir"
+        with patch.object(generator_module, "_get_candidate_store", _boom), \
+             patch.object(generator_module, "EXAMPLES_DIR", missing_examples_dir):
+            text = example_letter_text("nl")
+            assert text == ""  # must not raise; same empty result as "nothing uploaded"
+        print("PASS test_example_letter_text_tolerates_a_broken_store")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_application_paths_names_follow_language():
@@ -246,6 +375,13 @@ if __name__ == "__main__":
     test_detect_language()
     test_candidate_config_loads()
     test_load_candidate_falls_back_to_example_when_missing()
+    test_load_candidate_prefers_the_stored_profile_over_the_file()
+    test_load_candidate_falls_back_to_file_when_store_has_no_resume_yet()
+    test_load_candidate_tolerates_a_broken_store()
+    test_load_candidate_with_explicit_path_never_touches_the_store()
+    test_example_letter_text_prefers_the_stored_style_example()
+    test_example_letter_text_falls_back_to_file_when_nothing_stored()
+    test_example_letter_text_tolerates_a_broken_store()
     test_application_paths_names_follow_language()
     test_cv_render_context_maps_bullet_bank_by_language()
     test_bullet_text_does_not_leak_other_language()

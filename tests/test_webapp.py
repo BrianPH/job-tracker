@@ -59,6 +59,24 @@ def main():
         generator.ROOT / "config" / "candidate.example.yaml")
     generator.load_candidate = lambda path=None: _example_candidate
 
+    # Same reasoning as the load_candidate pin above, for the OTHER half of
+    # the candidate_profile store: generator.example_letter_text() is called
+    # unconditionally by the real generate/regenerate pipeline (no "skip if
+    # given" like load_candidate has), and without this pin it would consult
+    # candidate_store.make_candidate_store() -- a LocalJSONCandidateProfileStore
+    # pointed at the real, CWD-relative data/candidate_profile.json once this
+    # feature is actually used, leaking the real style example into this
+    # test run. An empty store here makes it fall through to the
+    # Solliciteren/Motivatie.docx file path exactly as before this store
+    # existed -- "" in this sandbox (that directory is gitignored and
+    # absent here), but the REAL docx text on a host where it's bind-mounted
+    # (docker-compose.yml). Nothing in this file asserts on the style
+    # example's content either way, so either result is fine; the point of
+    # this pin is only to stop reading whatever the real upload holds.
+    from jobtracker.candidate_store import LocalJSONCandidateProfileStore
+    _empty_candidate_store = LocalJSONCandidateProfileStore(str(tmp / "candidate_profile.json"))
+    generator._get_candidate_store = lambda: _empty_candidate_store
+
     class _FakeRecordStore:
         """issue #13: generate/regenerate now pass a record_store through
         webapp._record_store() -- patched here (same reasoning as _store()
